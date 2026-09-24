@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .models import Item, Score
+from .models import Enriched, Item, Score
 
 # База лежит рядом с репозиторием, в data/ (в git не попадает).
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +34,16 @@ CREATE TABLE IF NOT EXISTS scores (
     reason    TEXT DEFAULT '',
     model     TEXT DEFAULT '',
     scored_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS enrichment (  -- русская выжимка по полному тексту (Claude)
+    item_uid     TEXT PRIMARY KEY REFERENCES items(uid),
+    fulltext     TEXT DEFAULT '',        -- извлечённый полный текст статьи
+    image_url    TEXT DEFAULT '',        -- главная картинка (для «Подробнее»)
+    ru_title     TEXT DEFAULT '',        -- заголовок по-русски
+    ru_summary   TEXT DEFAULT '',        -- 2–3 предложения сути (для дайджеста)
+    ru_takeaways TEXT DEFAULT '',        -- JSON-список тейков (для «Подробнее»)
+    ru_conclusion TEXT DEFAULT '',       -- вывод/аналитика (для «Подробнее»)
+    enriched_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reactions (   -- этап 2: 👍/👎 на пункты дайджеста
     item_uid TEXT PRIMARY KEY REFERENCES items(uid),
@@ -117,6 +128,54 @@ class Storage:
             score = Score(item_uid=r["uid"], score=r["s_score"], reason=r["s_reason"],
                           model=r["s_model"], scored_at=r["s_at"])
             out.append((item, score))
+        return out
+
+    # --- обогащение (русская выжимка) ---
+
+    def to_enrich(self, limit: int) -> list[Item]:
+        """Свежие ещё не обогащённые и не отправленные новости — кандидаты на выжимку."""
+        cur = self._db.execute(
+            "SELECT i.* FROM items i LEFT JOIN enrichment e ON e.item_uid = i.uid"
+            " WHERE i.delivered = 0 AND e.item_uid IS NULL"
+            " ORDER BY i.collected_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [self._row_to_item(r) for r in cur.fetchall()]
+
+    def save_enrichment(self, uid: str, fulltext: str, image_url: str, ru: dict) -> None:
+        """Сохранить результат выжимки. ru = {title, summary, takeaways[list], conclusion}."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO enrichment"
+            " (item_uid, fulltext, image_url, ru_title, ru_summary, ru_takeaways,"
+            "  ru_conclusion, enriched_at) VALUES (?,?,?,?,?,?,?,?)",
+            (uid, fulltext or "", image_url or "", ru.get("title", ""),
+             ru.get("summary", ""), json.dumps(ru.get("takeaways", []), ensure_ascii=False),
+             ru.get("conclusion", ""), _now()),
+        )
+        self._db.commit()
+
+    def enriched_for_digest(self, limit: int) -> list[Enriched]:
+        """Обогащённые, но ещё не отправленные новости — то, что пойдёт в дайджест."""
+        cur = self._db.execute(
+            "SELECT i.uid, i.source_name, i.url, e.image_url, e.ru_title, e.ru_summary,"
+            "       e.ru_takeaways, e.ru_conclusion"
+            " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
+            " WHERE i.delivered = 0 AND e.ru_summary != ''"
+            " ORDER BY i.collected_at DESC LIMIT ?",
+            (limit,),
+        )
+        out: list[Enriched] = []
+        for r in cur.fetchall():
+            try:
+                takeaways = json.loads(r["ru_takeaways"] or "[]")
+            except (ValueError, TypeError):
+                takeaways = []
+            out.append(Enriched(
+                uid=r["uid"], source_name=r["source_name"], url=r["url"],
+                ru_title=r["ru_title"], ru_summary=r["ru_summary"],
+                ru_takeaways=takeaways, ru_conclusion=r["ru_conclusion"],
+                image_url=r["image_url"],
+            ))
         return out
 
     def mark_delivered(self, uids: list[str]) -> None:

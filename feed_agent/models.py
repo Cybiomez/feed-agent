@@ -45,3 +45,20 @@ class Score:
     reason: str = ""
     model: str = ""
     scored_at: str = ""
+
+
+@dataclass
+class Enriched:
+    """Новость, обогащённая русской выжимкой (результат скачивания + Claude).
+
+    ru_summary идёт в компактный дайджест; takeaways/conclusion/image кэшируются
+    для будущего «Подробнее» (v2.2)."""
+
+    uid: str
+    source_name: str
+    url: str
+    ru_title: str
+    ru_summary: str                      # 2–3 предложения сути (для дайджеста)
+    ru_takeaways: list = field(default_factory=list)  # тейки (для «Подробнее»)
+    ru_conclusion: str = ""              # вывод/аналитика (для «Подробнее»)
+    image_url: str = ""

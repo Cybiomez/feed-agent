@@ -37,8 +37,15 @@ class Settings:
 
     max_items_per_run: int = 60
     history_days: int = 14
+    # Сколько новостей за прогон обогащаем русской выжимкой (полный текст + Claude) —
+    # это дороже, поэтому берём топ N свежих, а не весь поток.
+    enrich_per_run: int = 10
     threshold: int = 45
     digest_max_items: int = 12
+    # Суммаризатор русской выжимки: "claude" (локальный claude CLI) | "stub" (офлайн).
+    summarizer: str = "claude"
+    summarizer_model: str = ""           # пусто = модель по умолчанию claude CLI
+    summarizer_timeout_s: int = 120
     provider: str = "openrouter"
     model: str = "qwen/qwen-2.5-72b-instruct:free"
     batch_size: int = 20
@@ -59,13 +66,18 @@ def load_settings() -> Settings:
     run = raw.get("run", {})
     flt = raw.get("filter", {})
     mdl = raw.get("model", {})
+    smz = raw.get("summarizer", {})
     dlv = raw.get("delivery", {})
     d = Settings()  # дефолты
     return Settings(
         max_items_per_run=run.get("max_items_per_run", d.max_items_per_run),
         history_days=run.get("history_days", d.history_days),
+        enrich_per_run=run.get("enrich_per_run", d.enrich_per_run),
         threshold=flt.get("threshold", d.threshold),
         digest_max_items=flt.get("digest_max_items", d.digest_max_items),
+        summarizer=smz.get("provider", d.summarizer),
+        summarizer_model=smz.get("model", d.summarizer_model),
+        summarizer_timeout_s=smz.get("timeout_s", d.summarizer_timeout_s),
         provider=mdl.get("provider", d.provider),
         model=mdl.get("model", d.model),
         batch_size=mdl.get("batch_size", d.batch_size),
