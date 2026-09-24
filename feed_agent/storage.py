@@ -178,6 +178,37 @@ class Storage:
             ))
         return out
 
+    def get_enriched(self, uid: str) -> Enriched | None:
+        """Одна обогащённая новость по id — для разворота «Подробнее»."""
+        cur = self._db.execute(
+            "SELECT i.uid, i.source_name, i.url, e.image_url, e.ru_title, e.ru_summary,"
+            "       e.ru_takeaways, e.ru_conclusion"
+            " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
+            " WHERE i.uid = ? AND e.ru_summary != ''",
+            (uid,),
+        )
+        r = cur.fetchone()
+        if not r:
+            return None
+        try:
+            takeaways = json.loads(r["ru_takeaways"] or "[]")
+        except (ValueError, TypeError):
+            takeaways = []
+        return Enriched(
+            uid=r["uid"], source_name=r["source_name"], url=r["url"],
+            ru_title=r["ru_title"], ru_summary=r["ru_summary"],
+            ru_takeaways=takeaways, ru_conclusion=r["ru_conclusion"],
+            image_url=r["image_url"],
+        )
+
+    def add_reaction(self, uid: str, reaction: str) -> None:
+        """Сохранить реакцию 👍/👎 на новость (для будущего обучения вкуса)."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO reactions (item_uid, reaction, at) VALUES (?,?,?)",
+            (uid, reaction, _now()),
+        )
+        self._db.commit()
+
     def mark_delivered(self, uids: list[str]) -> None:
         self._db.executemany("UPDATE items SET delivered = 1 WHERE uid = ?",
                              [(u,) for u in uids])
