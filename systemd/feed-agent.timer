@@ -1,0 +1,12 @@
+# Таймер: запускать фид-агент 3 раза в день (09:00, 14:00, 20:00 локального времени).
+# Ставится в ~/.config/systemd/user/ ; включить:
+#   systemctl --user enable --now feed-agent.timer
+[Unit]
+Description=feed-agent — расписание прогонов
+
+[Timer]
+OnCalendar=*-*-* 09,14,20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
