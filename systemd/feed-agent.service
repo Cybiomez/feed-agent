@@ -14,5 +14,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/projects/feed-agent
-EnvironmentFile=%h/.config/feed-agent/env
+# PATH нужен, чтобы нашёлся шов notify (~/.local/bin).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Ключ провайдера — необязателен (при пороге 0 работает заглушка без ключа). Leading "-"
+# = не падать, если файла нет. Появится (для QWEN) — подхватится автоматически.
+EnvironmentFile=-%h/.config/feed-agent/env
 ExecStart=%h/projects/feed-agent/.venv/bin/python -m feed_agent --once
