@@ -14,12 +14,18 @@ enrich_per_run = 20
 digest_max_items = 8
 
 [summarizer]
-# Кто делает русскую выжимку: "claude" (локальный claude CLI, без ключа) | "stub" (офлайн).
-provider = "claude"
-# Модель claude CLI: пусто = по умолчанию.
-model = ""
-# Таймаут одного вызова Claude, сек.
-timeout_s = 120
+# Кто делает русскую выжимку:
+#   "claude"     — локальный claude CLI (без ключа, через подписку)
+#   "openrouter" — бесплатная модель QWEN через OpenRouter (нужен бесплатный ключ)
+#   "stub"       — офлайн-заглушка (без модели)
+provider = "openrouter"
+# Модель. Для claude: пусто = по умолчанию. Для openrouter — id модели (бесплатные — с ":free").
+model = "qwen/qwen-2.5-72b-instruct:free"
+# Таймаут одного вызова модели, сек.
+timeout_s = 60
+# Только для openrouter: база API и имя переменной окружения с ключом (сам ключ вне репозитория).
+api_base = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
 
 [delivery]
 # Команда шва notify (доставка в Telegram).

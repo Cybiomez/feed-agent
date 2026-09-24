@@ -5,11 +5,12 @@
 # Ставится в ~/.config/systemd/user/ ; включить:
 #   systemctl --user enable --now feed-agent-bot.service
 #
-# Токен бота — в EnvironmentFile, наполняется из Vaultwarden через брокер secret (значение
-# не печатается). Разово, при разблокированном хранилище:
+# Секреты — в EnvironmentFile, наполняются из Vaultwarden через брокер secret (значение не
+# печатается): FEED_BOT_TOKEN (токен бота) и OPENROUTER_API_KEY (бесплатный ключ QWEN, если
+# summarizer.provider = "openrouter"). Разово, при разблокированном хранилище:
 #   export BW_SESSION=$(bw unlock --raw)
 #   mkdir -p ~/.config/feed-agent
-#   printf 'FEED_BOT_TOKEN={{telegram/mycelium-charlie-news-bot}}\n' > /tmp/feedenv.tpl
+#   printf 'FEED_BOT_TOKEN={{telegram/mycelium-charlie-news-bot}}\nOPENROUTER_API_KEY={{openrouter/api-key}}\n' > /tmp/feedenv.tpl
 #   mv "$(secret render /tmp/feedenv.tpl)" ~/.config/feed-agent/env && chmod 600 ~/.config/feed-agent/env
 #   rm -f /tmp/feedenv.tpl
 [Unit]

@@ -50,6 +50,9 @@ class Settings:
     summarizer: str = "claude"
     summarizer_model: str = ""           # пусто = модель по умолчанию claude CLI
     summarizer_timeout_s: int = 120
+    # Для суммаризатора "openrouter" (бесплатный QWEN): база API и имя переменной с ключом.
+    summarizer_api_base: str = "https://openrouter.ai/api/v1"
+    summarizer_api_key_env: str = "OPENROUTER_API_KEY"
     provider: str = "openrouter"
     model: str = "qwen/qwen-2.5-72b-instruct:free"
     batch_size: int = 20
@@ -83,6 +86,8 @@ def load_settings() -> Settings:
         summarizer=smz.get("provider", d.summarizer),
         summarizer_model=smz.get("model", d.summarizer_model),
         summarizer_timeout_s=smz.get("timeout_s", d.summarizer_timeout_s),
+        summarizer_api_base=smz.get("api_base", d.summarizer_api_base),
+        summarizer_api_key_env=smz.get("api_key_env", d.summarizer_api_key_env),
         provider=mdl.get("provider", d.provider),
         model=mdl.get("model", d.model),
         batch_size=mdl.get("batch_size", d.batch_size),

@@ -18,4 +18,11 @@ def make_summarizer(settings: Settings, force_stub: bool = False) -> Summarizer:
 
         return ClaudeSummarizer(timeout_s=settings.summarizer_timeout_s,
                                 model=settings.summarizer_model)
+    if settings.summarizer == "openrouter":
+        from .openrouter import OpenRouterSummarizer
+
+        return OpenRouterSummarizer(model=settings.summarizer_model,
+                                    api_base=settings.summarizer_api_base,
+                                    api_key_env=settings.summarizer_api_key_env,
+                                    timeout_s=settings.summarizer_timeout_s)
     raise ValueError(f"Неизвестный суммаризатор: {settings.summarizer!r}")
