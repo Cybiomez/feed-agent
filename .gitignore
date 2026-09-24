@@ -3,10 +3,12 @@
 # или в окружении systemd, никогда в репозитории.
 *.env
 .env
-config/settings.toml        # реальные настройки (копия из settings.example.toml)
-config/sources.toml         # реальные источники
-config/profile.md           # реальный профиль вкуса
-data/                       # SQLite-база новостей/оценок/реакций
+# Реальные конфиги (копии из *.example) — вне git
+config/settings.toml
+config/sources.toml
+config/profile.md
+# Данные (SQLite-база новостей/оценок/реакций)
+data/
 *.db
 *.sqlite3
 
