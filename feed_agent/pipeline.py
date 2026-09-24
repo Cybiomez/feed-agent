@@ -36,9 +36,19 @@ def collect(storage: Storage, sources) -> int:
     return new
 
 
+def _body_and_image(item) -> tuple[str, str]:
+    """Тело для выжимки и картинка. Пост канала самодостаточен (не качаем), статью — качаем."""
+    if "t.me/" in item.url:
+        return item.summary or item.title, ""
+    fulltext, image = fetch_article(item.url)
+    return fulltext or item.summary or item.title, image
+
+
 def enrich(storage: Storage, settings, summarizer, profile: str) -> tuple[int, int]:
-    """Просеять пул по релевантности профилю, нерелевантные пометить (чтобы не смотреть их
-    снова), релевантные обогатить русской выжимкой. Возвращает (обогащено, отсеяно)."""
+    """Просеять по релевантности, сгруппировать дубли (одно событие из разных каналов),
+    обогатить КАЖДУЮ группу русской выжимкой (слив тексты источников). Цель — не потерять
+    ничего: обрабатываем все релевантные, лимит — лишь предохранитель от разовой лавины.
+    Возвращает (обогащено_групп, отсеяно)."""
     candidates = storage.to_enrich(settings.prefilter_pool)
     if not candidates:
         return 0, 0
@@ -52,20 +62,42 @@ def enrich(storage: Storage, settings, summarizer, profile: str) -> tuple[int, i
         if it.uid not in relevant_uids:
             storage.save_enrichment(it.uid, "", "", {})
             dropped += 1
+    if not relevant:
+        return 0, dropped
 
-    # Обогащаем топ-N релевантных (полный текст + Claude). Остальные релевантные подождут
-    # следующего прогона.
+    # Группируем дубли: одно событие в нескольких каналах — в одну группу.
+    groups = summarizer.group_duplicates(relevant)
+
+    # Предохранитель: не больше N групп за прогон. Остаток НЕ теряется — уйдёт следующим
+    # прогоном (об усечении сообщаем в лог, без «тихого» лимита).
+    cap = settings.enrich_per_run
+    if len(groups) > cap:
+        print(f"enrich: групп {len(groups)} > предохранителя {cap}; остаток уйдёт позже")
+        groups = groups[:cap]
+
     done = 0
-    for item in relevant[: settings.enrich_per_run]:
-        if "t.me/" in item.url:
-            fulltext, image = "", ""      # пост канала самодостаточен — качать не надо
-        else:
-            fulltext, image = fetch_article(item.url)
-        # summarize сам возьмёт текст поста (item.summary), если fulltext пуст
-        ru = summarizer.summarize(item, fulltext)
+    for group in groups:
+        members = [relevant[i] for i in group]
+        # Сливаем тела всех источников группы (взаимодополнение при дублях).
+        blocks, image, names = [], "", []
+        for m in members:
+            body, img = _body_and_image(m)
+            blocks.append(f"[{m.source_name}]\n{body}")
+            names.append(m.source_name)
+            if not image and img:
+                image = img
+        combined = ("Материал по одному событию из нескольких источников — объедини и "
+                    "взаимодополни:\n\n" if len(members) > 1 else "") + "\n\n".join(blocks)
+        rep = members[0]
+        ru = summarizer.summarize(rep, combined)
         if not ru or not ru.get("summary"):
-            continue  # не вышло — не роняем прогон (уйдёт в следующий раз)
-        storage.save_enrichment(item.uid, fulltext, image, ru)
+            continue  # не вышло — не роняем прогон, группа уйдёт в следующий раз
+        # уникальные источники в порядке появления
+        uniq = list(dict.fromkeys(names))
+        storage.save_enrichment(rep.uid, combined, image, ru, sources=" + ".join(uniq))
+        # прочих членов группы помечаем обработанными (слиты в rep) — отдельно не всплывут
+        for m in members[1:]:
+            storage.save_enrichment(m.uid, "", "", {})
         done += 1
     return done, dropped
 

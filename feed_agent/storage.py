@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS enrichment (  -- русская выжимка по �
     ru_summary   TEXT DEFAULT '',        -- 2–3 предложения сути (для дайджеста)
     ru_takeaways TEXT DEFAULT '',        -- JSON-список тейков (для «Подробнее»)
     ru_conclusion TEXT DEFAULT '',       -- вывод/аналитика (для «Подробнее»)
+    sources      TEXT DEFAULT '',        -- все источники (при слиянии дублей — через " + ")
     enriched_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reactions (   -- этап 2: 👍/👎 на пункты дайджеста
@@ -71,7 +72,14 @@ class Storage:
         self._db = sqlite3.connect(self.path)
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_SCHEMA)
+        self._migrate()
         self._db.commit()
+
+    def _migrate(self) -> None:
+        """Мягкие миграции: добавить недостающие колонки в существующую базу."""
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(enrichment)")}
+        if "sources" not in cols:
+            self._db.execute("ALTER TABLE enrichment ADD COLUMN sources TEXT DEFAULT ''")
 
     def close(self) -> None:
         self._db.close()
@@ -146,7 +154,9 @@ class Storage:
             " WHERE i.delivered = 0 AND e.item_uid IS NULL"
         ).fetchone()
         nsrc = (row[0] if row else 0) or 1
-        per_source = max(3, limit // nsrc)   # сколько новейших брать с каждого источника
+        # Берём с запасом с каждого источника (t.me/s/ отдаёт ~20 последних постов) — чтобы
+        # ничего не пропустить: цель «все новости», а не «топ-N».
+        per_source = max(25, limit // nsrc)
         cur = self._db.execute(
             "SELECT * FROM ("
             "  SELECT i.*, ROW_NUMBER() OVER ("
@@ -158,15 +168,17 @@ class Storage:
         )
         return [self._row_to_item(r) for r in cur.fetchall()]
 
-    def save_enrichment(self, uid: str, fulltext: str, image_url: str, ru: dict) -> None:
-        """Сохранить результат выжимки. ru = {title, summary, takeaways[list], conclusion}."""
+    def save_enrichment(self, uid: str, fulltext: str, image_url: str, ru: dict,
+                        sources: str = "") -> None:
+        """Сохранить результат выжимки. ru = {title, summary, takeaways[list], conclusion}.
+        sources — все источники новости (при слиянии дублей — через " + ")."""
         self._db.execute(
             "INSERT OR REPLACE INTO enrichment"
             " (item_uid, fulltext, image_url, ru_title, ru_summary, ru_takeaways,"
-            "  ru_conclusion, enriched_at) VALUES (?,?,?,?,?,?,?,?)",
+            "  ru_conclusion, sources, enriched_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (uid, fulltext or "", image_url or "", ru.get("title", ""),
              ru.get("summary", ""), json.dumps(ru.get("takeaways", []), ensure_ascii=False),
-             ru.get("conclusion", ""), _now()),
+             ru.get("conclusion", ""), sources or "", _now()),
         )
         self._db.commit()
 
@@ -174,38 +186,16 @@ class Storage:
         """Обогащённые, но ещё не отправленные новости — то, что пойдёт в дайджест."""
         cur = self._db.execute(
             "SELECT i.uid, i.source_name, i.url, e.image_url, e.ru_title, e.ru_summary,"
-            "       e.ru_takeaways, e.ru_conclusion"
+            "       e.ru_takeaways, e.ru_conclusion, e.sources"
             " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
             " WHERE i.delivered = 0 AND e.ru_summary != ''"
             " ORDER BY i.collected_at DESC LIMIT ?",
             (limit,),
         )
-        out: list[Enriched] = []
-        for r in cur.fetchall():
-            try:
-                takeaways = json.loads(r["ru_takeaways"] or "[]")
-            except (ValueError, TypeError):
-                takeaways = []
-            out.append(Enriched(
-                uid=r["uid"], source_name=r["source_name"], url=r["url"],
-                ru_title=r["ru_title"], ru_summary=r["ru_summary"],
-                ru_takeaways=takeaways, ru_conclusion=r["ru_conclusion"],
-                image_url=r["image_url"],
-            ))
-        return out
+        return [self._row_to_enriched(r) for r in cur.fetchall()]
 
-    def get_enriched(self, uid: str) -> Enriched | None:
-        """Одна обогащённая новость по id — для разворота «Подробнее»."""
-        cur = self._db.execute(
-            "SELECT i.uid, i.source_name, i.url, e.image_url, e.ru_title, e.ru_summary,"
-            "       e.ru_takeaways, e.ru_conclusion"
-            " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
-            " WHERE i.uid = ? AND e.ru_summary != ''",
-            (uid,),
-        )
-        r = cur.fetchone()
-        if not r:
-            return None
+    @staticmethod
+    def _row_to_enriched(r: sqlite3.Row) -> Enriched:
         try:
             takeaways = json.loads(r["ru_takeaways"] or "[]")
         except (ValueError, TypeError):
@@ -214,8 +204,20 @@ class Storage:
             uid=r["uid"], source_name=r["source_name"], url=r["url"],
             ru_title=r["ru_title"], ru_summary=r["ru_summary"],
             ru_takeaways=takeaways, ru_conclusion=r["ru_conclusion"],
-            image_url=r["image_url"],
+            image_url=r["image_url"], sources=(r["sources"] or r["source_name"]),
         )
+
+    def get_enriched(self, uid: str) -> Enriched | None:
+        """Одна обогащённая новость по id — для разворота «Подробнее»."""
+        cur = self._db.execute(
+            "SELECT i.uid, i.source_name, i.url, e.image_url, e.ru_title, e.ru_summary,"
+            "       e.ru_takeaways, e.ru_conclusion, e.sources"
+            " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
+            " WHERE i.uid = ? AND e.ru_summary != ''",
+            (uid,),
+        )
+        r = cur.fetchone()
+        return self._row_to_enriched(r) if r else None
 
     def add_reaction(self, uid: str, reaction: str) -> None:
         """Сохранить реакцию 👍/👎 на новость (для будущего обучения вкуса)."""

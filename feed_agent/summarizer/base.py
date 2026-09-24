@@ -22,6 +22,11 @@ class Summarizer(ABC):
         модель переопределяет. Фильтр не должен терять: при недоступности вернуть всё."""
         return items
 
+    def group_duplicates(self, items: list[Item]) -> list[list[int]]:
+        """Сгруппировать индексы новостей, освещающих ОДНО событие (дубли из разных каналов).
+        По умолчанию — каждая сама по себе (без слияния); модель переопределяет."""
+        return [[i] for i in range(len(items))]
+
     @abstractmethod
     def summarize(self, item: Item, fulltext: str) -> dict | None:
         """Сделать русскую выжимку по полному тексту статьи.

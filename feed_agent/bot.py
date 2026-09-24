@@ -32,8 +32,9 @@ from .summarizer import make_summarizer
 
 log = logging.getLogger("feed-agent.bot")
 
-# Часы прогонов (локальное время бокса, UTC). 9/14/20 UTC = 12/17/23 МСК.
-SCHEDULE_HOURS = "9,14,20"
+# Прогон каждый час (в minute=0). Цель — «все новости», поэтому часто и без лимита на объём;
+# высокочастотные каналы (t.me/s/ отдаёт ~20 последних) при часовом ритме не переполняются.
+SCHEDULE_MINUTE = 0
 
 
 # --- синхронная работа с БД/сетью (вызывается через asyncio.to_thread) ---
@@ -50,7 +51,7 @@ def _prepare_digest() -> list[Enriched]:
         collect(storage, sources)
         storage.purge_old(settings.history_days)
         enrich(storage, settings, make_summarizer(settings), profile)
-        return storage.enriched_for_digest(settings.digest_max_items)
+        return storage.enriched_for_digest(500)   # всё готовое; постранично отправит бот
     finally:
         storage.close()
 
@@ -81,12 +82,15 @@ def _react(uid: str, reaction: str) -> None:
 
 # --- сборка сообщений ---
 
-def _digest_message(items: list[Enriched]) -> tuple[str, object]:
-    """Текст дайджеста + инлайн-клавиатура (ряд кнопок на каждую новость)."""
-    lines = [f"🗞 <b>Дайджест</b> · {len(items)}"]
+def _digest_message(items: list[Enriched], start: int = 1) -> tuple[str, object]:
+    """Текст одной страницы дайджеста + инлайн-клавиатура (ряд кнопок на каждую новость).
+    start — номер первой новости на странице (для сквозной нумерации)."""
+    lines = ["🗞 <b>Дайджест</b>"]
     kb = InlineKeyboardBuilder()
-    for n, e in enumerate(items, 1):
-        lines.append(f"\n<b>{n}. {escape(e.ru_title)}</b>\n{escape(e.ru_summary)}")
+    for offset, e in enumerate(items):
+        n = start + offset
+        src = escape(e.sources or e.source_name)
+        lines.append(f"\n<b>{n}. {escape(e.ru_title)}</b>\n{escape(e.ru_summary)}\n<i>{src}</i>")
         kb.row(
             InlineKeyboardButton(text=f"{n} 📖 Подробнее", callback_data=f"det:{e.uid}"),
             InlineKeyboardButton(text="👍", callback_data=f"up:{e.uid}"),
@@ -102,7 +106,8 @@ def _detail_text(e: Enriched) -> str:
         parts += ["", "<b>Главное:</b>"] + [f"• {escape(t)}" for t in e.ru_takeaways]
     if e.ru_conclusion:
         parts += ["", f"<b>Вывод:</b> {escape(e.ru_conclusion)}"]
-    parts += ["", f"<i>{escape(e.source_name)}</i> · <a href=\"{escape(e.url, quote=True)}\">оригинал</a>"]
+    src = escape(e.sources or e.source_name)
+    parts += ["", f"<i>{src}</i> · <a href=\"{escape(e.url, quote=True)}\">оригинал</a>"]
     return "\n".join(parts)
 
 
@@ -157,16 +162,25 @@ def build_dispatcher(chat_id: int, thread_id: int | None) -> Dispatcher:
 
 
 async def send_digest(bot: Bot, chat_id: int, thread_id: int | None) -> int:
-    """Прогнать конвейер и отправить дайджест с кнопками. Возвращает число отправленных."""
+    """Прогнать конвейер и отправить ВСЕ готовые новости постранично (ничего не режем).
+    Возвращает число отправленных."""
     items = await asyncio.to_thread(_prepare_digest)
     if not items:
         log.info("digest: нечего слать")
         return 0
-    text, markup = _digest_message(items)
-    await bot.send_message(chat_id, text, message_thread_id=thread_id,
-                           reply_markup=markup, disable_web_page_preview=True)
-    await asyncio.to_thread(_mark_delivered, [e.uid for e in items])
-    log.info("digest: отправлено %d", len(items))
+    page = max(1, config.load_settings().digest_max_items)
+    sent: list[str] = []
+    start = 1
+    for i in range(0, len(items), page):
+        chunk = items[i : i + page]
+        text, markup = _digest_message(chunk, start=start)
+        await bot.send_message(chat_id, text, message_thread_id=thread_id,
+                               reply_markup=markup, disable_web_page_preview=True)
+        sent += [e.uid for e in chunk]
+        start += len(chunk)
+        await asyncio.sleep(0.5)   # мягко к лимитам Telegram
+    await asyncio.to_thread(_mark_delivered, sent)
+    log.info("digest: отправлено %d (страниц %d)", len(items), (len(items) + page - 1) // page)
     return len(items)
 
 
@@ -186,10 +200,11 @@ async def main() -> None:
 
     # Расписание прогонов внутри бота (он всегда на связи для callback'ов).
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_digest, CronTrigger(hour=SCHEDULE_HOURS, minute=0),
-                      args=[bot, chat_id, thread_id], id="digest")
+    scheduler.add_job(send_digest, CronTrigger(minute=SCHEDULE_MINUTE),
+                      args=[bot, chat_id, thread_id], id="digest",
+                      max_instances=1, coalesce=True)
     scheduler.start()
-    log.info("бот запущен; расписание часов (UTC): %s", SCHEDULE_HOURS)
+    log.info("бот запущен; прогон каждый час в minute=%s", SCHEDULE_MINUTE)
 
     await dp.start_polling(bot)
 

@@ -62,3 +62,4 @@ class Enriched:
     ru_takeaways: list = field(default_factory=list)  # тейки (для «Подробнее»)
     ru_conclusion: str = ""              # вывод/аналитика (для «Подробнее»)
     image_url: str = ""
+    sources: str = ""                    # все источники новости (при слиянии дублей — через +)
