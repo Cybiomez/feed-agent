@@ -62,11 +62,14 @@ def run_once(dry_run: bool = False, collect_only: bool = False) -> dict:
         summary.update(scored=scored, provider=provider.name, selected=len(selected))
 
         if selected:
-            text = build_digest(selected, settings)
+            text, included = build_digest(selected, settings)
             ok = deliver(text, settings.notify_cmd, dry_run=dry_run)
             summary["delivered"] = ok
+            summary["in_digest"] = len(included)   # реально вошло в сообщение
+            # Помечаем доставленными ТОЛЬКО вошедшие — обрезанные хвостом уйдут следующим
+            # прогоном, ничего не теряем.
             if ok and not dry_run:
-                storage.mark_delivered([it.uid for it, _ in selected])
+                storage.mark_delivered([it.uid for it, _ in included])
         else:
             summary["delivered"] = None  # нечего слать
 
