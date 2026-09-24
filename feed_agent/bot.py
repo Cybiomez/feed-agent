@@ -18,7 +18,8 @@ from html import escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import CallbackQuery, InlineKeyboardButton
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -109,6 +110,15 @@ def _detail_text(e: Enriched) -> str:
 
 def build_dispatcher(chat_id: int, thread_id: int | None) -> Dispatcher:
     dp = Dispatcher()
+
+    @dp.message(Command("news"))
+    async def on_news(msg: Message) -> None:
+        """Прислать дайджест по требованию (и для проверки после запуска)."""
+        await msg.answer("Собираю дайджест…", message_thread_id=msg.message_thread_id)
+        n = await send_digest(msg.bot, chat_id, thread_id)
+        if n == 0:
+            await msg.answer("Пока нечего слать — свежих новостей по профилю нет.",
+                            message_thread_id=msg.message_thread_id)
 
     @dp.callback_query(F.data.startswith("det:"))
     async def on_detail(cb: CallbackQuery) -> None:
