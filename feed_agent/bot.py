@@ -18,7 +18,7 @@ from html import escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -113,17 +113,21 @@ def _detail_text(e: Enriched) -> str:
 
 # --- хэндлеры и планировщик ---
 
-def build_dispatcher(chat_id: int, thread_id: int | None) -> Dispatcher:
+def build_dispatcher(chat_id: int, thread_id: int | None, bot_username: str) -> Dispatcher:
     dp = Dispatcher()
+    uname = (bot_username or "").lower()
 
     @dp.message(Command("news"))
-    async def on_news(msg: Message) -> None:
-        """Прислать дайджест по требованию (и для проверки после запуска)."""
-        await msg.answer("Собираю дайджест…", message_thread_id=msg.message_thread_id)
+    async def on_news(msg: Message, command: CommandObject) -> None:
+        """Прислать дайджест — ТОЛЬКО когда обратились явно (/news@наш_бот). В группе с
+        несколькими ботами голый /news игнорируем, чтобы не отвечать всем сразу."""
+        mention = (command.mention or "").lower()
+        if mention != uname:
+            return  # не к нам обращались — молчим
+        await msg.answer("Собираю дайджест…")   # answer сам отвечает в ту же тему
         n = await send_digest(msg.bot, chat_id, thread_id)
         if n == 0:
-            await msg.answer("Пока нечего слать — свежих новостей по профилю нет.",
-                            message_thread_id=msg.message_thread_id)
+            await msg.answer("Пока нечего слать — свежих новостей по профилю нет.")
 
     @dp.callback_query(F.data.startswith("det:"))
     async def on_detail(cb: CallbackQuery) -> None:
@@ -196,7 +200,9 @@ async def main() -> None:
     thread_id = int(settings.target_thread) if settings.target_thread else None
 
     bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
-    dp = build_dispatcher(chat_id, thread_id)
+    me = await bot.get_me()
+    dp = build_dispatcher(chat_id, thread_id, me.username)
+    log.info("бот @%s (команды — только с явным обращением /news@%s)", me.username, me.username)
 
     # Расписание прогонов внутри бота (он всегда на связи для callback'ов).
     scheduler = AsyncIOScheduler()
