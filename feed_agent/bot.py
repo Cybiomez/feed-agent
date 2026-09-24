@@ -31,9 +31,10 @@ from .summarizer import make_summarizer
 
 log = logging.getLogger("feed-agent.bot")
 
-# Прогон каждый час (в minute=0). Цель — «все новости», поэтому часто и без лимита на объём;
-# высокочастотные каналы (t.me/s/ отдаёт ~20 последних) при часовом ритме не переполняются.
-SCHEDULE_MINUTE = 0
+# Прогоны 3 раза в день: 07:30, 13:30, 17:30 МСК = 04:30, 10:30, 14:30 UTC
+# (бокс в UTC; МСК = UTC+3, без переходов на летнее время).
+SCHEDULE_HOURS_UTC = "4,10,14"
+SCHEDULE_MINUTE = 30
 
 
 # --- синхронная работа с БД/сетью (вызывается через asyncio.to_thread) ---
@@ -233,11 +234,12 @@ async def main() -> None:
 
     # Расписание прогонов внутри бота (он всегда на связи для callback'ов).
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_digest, CronTrigger(minute=SCHEDULE_MINUTE),
+    scheduler.add_job(send_digest, CronTrigger(hour=SCHEDULE_HOURS_UTC, minute=SCHEDULE_MINUTE),
                       args=[bot, chat_id, thread_id], id="digest",
                       max_instances=1, coalesce=True)
     scheduler.start()
-    log.info("бот запущен; прогон каждый час в minute=%s", SCHEDULE_MINUTE)
+    log.info("бот запущен; прогоны 07:30/13:30/17:30 МСК (%s:%s UTC)",
+             SCHEDULE_HOURS_UTC, SCHEDULE_MINUTE)
 
     await dp.start_polling(bot)
 
