@@ -36,23 +36,41 @@ def collect(storage: Storage, sources) -> int:
     return new
 
 
-def enrich(storage: Storage, settings, summarizer) -> int:
-    """Скачать полный текст и сделать русскую выжимку по топ-N свежих новостей."""
+def enrich(storage: Storage, settings, summarizer, profile: str) -> tuple[int, int]:
+    """Просеять пул по релевантности профилю, нерелевантные пометить (чтобы не смотреть их
+    снова), релевантные обогатить русской выжимкой. Возвращает (обогащено, отсеяно)."""
+    candidates = storage.to_enrich(settings.prefilter_pool)
+    if not candidates:
+        return 0, 0
+
+    relevant = summarizer.filter_relevant(candidates, profile)
+    relevant_uids = {it.uid for it in relevant}
+
+    # Нерелевантные помечаем обработанными (пустая выжимка) — в кандидаты больше не попадут.
+    dropped = 0
+    for it in candidates:
+        if it.uid not in relevant_uids:
+            storage.save_enrichment(it.uid, "", "", {})
+            dropped += 1
+
+    # Обогащаем топ-N релевантных (полный текст + Claude). Остальные релевантные подождут
+    # следующего прогона.
     done = 0
-    for item in storage.to_enrich(settings.enrich_per_run):
+    for item in relevant[: settings.enrich_per_run]:
         fulltext, image = fetch_article(item.url)
         ru = summarizer.summarize(item, fulltext)
         if not ru or not ru.get("summary"):
-            continue  # не вышло — пропускаем, не роняя прогон (уйдёт в следующий раз)
+            continue  # не вышло — не роняем прогон (уйдёт в следующий раз)
         storage.save_enrichment(item.uid, fulltext, image, ru)
         done += 1
-    return done
+    return done, dropped
 
 
 def run_once(dry_run: bool = False, collect_only: bool = False) -> dict:
     """Один полный прогон. Возвращает сводку (для лога/отчёта)."""
     settings = config.load_settings()
     sources = config.load_sources()
+    profile = config.load_profile()
     storage = Storage()
     summary: dict[str, object] = {"dry_run": dry_run, "collect_only": collect_only}
 
@@ -65,10 +83,10 @@ def run_once(dry_run: bool = False, collect_only: bool = False) -> dict:
             storage.kv_set("last_collect", _now())
             return summary
 
-        # Обогащение: полный текст + русская выжимка (в сухом прогоне — офлайн-заглушкой).
+        # Фильтр по вкусу + обогащение (в сухом прогоне — офлайн-заглушкой).
         summarizer = make_summarizer(settings, force_stub=dry_run)
-        enriched_n = enrich(storage, settings, summarizer)
-        summary.update(summarizer=summarizer.name, enriched=enriched_n)
+        enriched_n, dropped_n = enrich(storage, settings, summarizer, profile)
+        summary.update(summarizer=summarizer.name, enriched=enriched_n, dropped=dropped_n)
 
         # Дайджест из обогащённых, ещё не отправленных новостей.
         items = storage.enriched_for_digest(settings.digest_max_items)

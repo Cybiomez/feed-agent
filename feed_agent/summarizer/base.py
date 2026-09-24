@@ -17,6 +17,11 @@ class Summarizer(ABC):
 
     name = "base"
 
+    def filter_relevant(self, items: list[Item], profile: str) -> list[Item]:
+        """Оставить только релевантные профилю новости. По умолчанию — все (без фильтра);
+        модель переопределяет. Фильтр не должен терять: при недоступности вернуть всё."""
+        return items
+
     @abstractmethod
     def summarize(self, item: Item, fulltext: str) -> dict | None:
         """Сделать русскую выжимку по полному тексту статьи.

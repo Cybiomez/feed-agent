@@ -37,8 +37,10 @@ class Settings:
 
     max_items_per_run: int = 60
     history_days: int = 14
-    # Сколько новостей за прогон обогащаем русской выжимкой (полный текст + Claude) —
-    # это дороже, поэтому берём топ N свежих, а не весь поток.
+    # Сколько свежих новостей просеиваем фильтром релевантности за прогон (по заголовкам).
+    prefilter_pool: int = 30
+    # Сколько прошедших фильтр новостей обогащаем русской выжимкой (полный текст + Claude) —
+    # это дороже, поэтому берём топ N, а не весь поток.
     enrich_per_run: int = 10
     threshold: int = 45
     digest_max_items: int = 12
@@ -72,6 +74,7 @@ def load_settings() -> Settings:
     return Settings(
         max_items_per_run=run.get("max_items_per_run", d.max_items_per_run),
         history_days=run.get("history_days", d.history_days),
+        prefilter_pool=run.get("prefilter_pool", d.prefilter_pool),
         enrich_per_run=run.get("enrich_per_run", d.enrich_per_run),
         threshold=flt.get("threshold", d.threshold),
         digest_max_items=flt.get("digest_max_items", d.digest_max_items),
