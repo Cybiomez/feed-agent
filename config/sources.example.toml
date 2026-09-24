@@ -1,0 +1,18 @@
+# Источники новостей. Скопировать в sources.toml и править.
+# Каждый источник — с типом (адаптером). Сейчас поддержан "rss"; "telegram" — позже.
+# name — метка в дайджесте; url — адрес ленты; weight — необязательный вес (пока не используется).
+
+[[source]]
+type = "rss"
+name = "Hacker News (front)"
+url  = "https://hnrss.org/frontpage"
+
+[[source]]
+type = "rss"
+name = "Ars Technica"
+url  = "https://feeds.arstechnica.com/arstechnica/index"
+
+[[source]]
+type = "rss"
+name = "The Verge"
+url  = "https://www.theverge.com/rss/index.xml"

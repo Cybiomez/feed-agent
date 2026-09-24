@@ -1,0 +1,7 @@
+{
+  "id": "feed-agent", "name": "feed-agent", "mark": "#E0C3A9",
+  "description": "Фильтрует поток новостей по профилю вкуса и шлёт дайджест в Telegram.",
+  "location": "Бокс", "mechanism": "Таймер", "schedule": "2–3 раза в день",
+  "monitor": { "watches": "Последний прогон и число отобранных новостей" },
+  "check": { "type": "static", "level": "ok" }
+}
