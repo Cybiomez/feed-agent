@@ -18,7 +18,6 @@ from html import escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -113,21 +112,35 @@ def _detail_text(e: Enriched) -> str:
 
 # --- хэндлеры и планировщик ---
 
-def build_dispatcher(chat_id: int, thread_id: int | None, bot_username: str) -> Dispatcher:
-    dp = Dispatcher()
-    uname = (bot_username or "").lower()
+def _mentions_me(msg: Message, username: str, bot_id: int) -> bool:
+    """Упомянут ли наш бот в сообщении (тег @username или text_mention на его id)."""
+    text = msg.text or msg.caption or ""
+    ents = msg.entities or msg.caption_entities or []
+    want = ("@" + username).lower()
+    for e in ents:
+        if e.type == "mention" and text[e.offset:e.offset + e.length].lower() == want:
+            return True
+        if e.type == "text_mention" and e.user and e.user.id == bot_id:
+            return True
+    return False
 
-    @dp.message(Command("news"))
-    async def on_news(msg: Message, command: CommandObject) -> None:
-        """Прислать дайджест — ТОЛЬКО когда обратились явно (/news@наш_бот). В группе с
-        несколькими ботами голый /news игнорируем, чтобы не отвечать всем сразу."""
-        mention = (command.mention or "").lower()
-        if mention != uname:
-            return  # не к нам обращались — молчим
+
+def build_dispatcher(chat_id: int, thread_id: int | None,
+                     bot_username: str, bot_id: int) -> Dispatcher:
+    dp = Dispatcher()
+
+    async def _deliver(msg: Message) -> None:
         await msg.answer("Собираю дайджест…")   # answer сам отвечает в ту же тему
         n = await send_digest(msg.bot, chat_id, thread_id)
         if n == 0:
             await msg.answer("Пока нечего слать — свежих новостей по профилю нет.")
+
+    @dp.message(F.text | F.caption)
+    async def on_mention(msg: Message) -> None:
+        """Реагируем, когда бота УПОМЯНУЛИ в сообщении (тегнули @…) — прислать дайджест.
+        Приватность бота включена, так что нетегнутые сообщения сюда и не приходят."""
+        if _mentions_me(msg, bot_username, bot_id):
+            await _deliver(msg)
 
     @dp.callback_query(F.data.startswith("det:"))
     async def on_detail(cb: CallbackQuery) -> None:
@@ -201,8 +214,8 @@ async def main() -> None:
 
     bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
     me = await bot.get_me()
-    dp = build_dispatcher(chat_id, thread_id, me.username)
-    log.info("бот @%s (команды — только с явным обращением /news@%s)", me.username, me.username)
+    dp = build_dispatcher(chat_id, thread_id, me.username, me.id)
+    log.info("бот @%s — реагирует на упоминание (@%s) в сообщении", me.username, me.username)
 
     # Расписание прогонов внутри бота (он всегда на связи для callback'ов).
     scheduler = AsyncIOScheduler()
