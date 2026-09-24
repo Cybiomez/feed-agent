@@ -57,7 +57,11 @@ def enrich(storage: Storage, settings, summarizer, profile: str) -> tuple[int, i
     # следующего прогона.
     done = 0
     for item in relevant[: settings.enrich_per_run]:
-        fulltext, image = fetch_article(item.url)
+        if "t.me/" in item.url:
+            fulltext, image = "", ""      # пост канала самодостаточен — качать не надо
+        else:
+            fulltext, image = fetch_article(item.url)
+        # summarize сам возьмёт текст поста (item.summary), если fulltext пуст
         ru = summarizer.summarize(item, fulltext)
         if not ru or not ru.get("summary"):
             continue  # не вышло — не роняем прогон (уйдёт в следующий раз)

@@ -9,11 +9,12 @@ from __future__ import annotations
 from ..config import Source
 from .base import Collector
 from .rss import RssCollector
+from .telegram import TelegramCollector
 
 # Тип источника (Source.type) -> класс сборщика.
 COLLECTORS: dict[str, type[Collector]] = {
     "rss": RssCollector,
-    # "telegram": TelegramCollector,   # этап 2
+    "telegram": TelegramCollector,
 }
 
 
