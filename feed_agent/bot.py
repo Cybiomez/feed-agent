@@ -112,17 +112,29 @@ def _detail_text(e: Enriched) -> str:
 
 # --- хэндлеры и планировщик ---
 
-def _mentions_me(msg: Message, username: str, bot_id: int) -> bool:
-    """Упомянут ли наш бот в сообщении (тег @username или text_mention на его id)."""
+def _addressed_to_me(msg: Message, username: str, bot_id: int) -> bool:
+    """Обратились ли к нам ЯВНО: тег @username, text_mention на id, или команда вида
+    /cmd@username. Голая команда (/cmd) и упоминание другого бота — не про нас."""
     text = msg.text or msg.caption or ""
     ents = msg.entities or msg.caption_entities or []
     want = ("@" + username).lower()
     for e in ents:
-        if e.type == "mention" and text[e.offset:e.offset + e.length].lower() == want:
+        frag = text[e.offset:e.offset + e.length].lower()
+        if e.type == "mention" and frag == want:
+            return True
+        if e.type == "bot_command" and frag.endswith(want):   # /news@наш_бот
             return True
         if e.type == "text_mention" and e.user and e.user.id == bot_id:
             return True
     return False
+
+
+def _command_word(text: str) -> str:
+    """Первое слово-команда сообщения без ведущего / и без @suffix (или пусто)."""
+    for tok in text.split():
+        if tok.startswith("/"):
+            return tok[1:].split("@")[0].lower()
+    return ""
 
 
 def build_dispatcher(chat_id: int, thread_id: int | None,
@@ -136,10 +148,12 @@ def build_dispatcher(chat_id: int, thread_id: int | None,
             await msg.answer("Пока нечего слать — свежих новостей по профилю нет.")
 
     @dp.message(F.text | F.caption)
-    async def on_mention(msg: Message) -> None:
-        """Реагируем, когда бота УПОМЯНУЛИ в сообщении (тегнули @…) — прислать дайджест.
-        Приватность бота включена, так что нетегнутые сообщения сюда и не приходят."""
-        if _mentions_me(msg, bot_username, bot_id):
+    async def on_command(msg: Message) -> None:
+        """Команда срабатывает, только если к боту обратились ЯВНО (тег или /cmd@бот) И это
+        известная команда. Пример: «@MyCeliumCharlieNewsBot /news» или «/news@…»."""
+        if not _addressed_to_me(msg, bot_username, bot_id):
+            return
+        if _command_word(msg.text or msg.caption or "") == "news":
             await _deliver(msg)
 
     @dp.callback_query(F.data.startswith("det:"))
