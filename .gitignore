@@ -1,0 +1,23 @@
+# --- секреты и локальные данные (в git не попадают) ---
+# Ключи провайдеров моделей, токены — только в хранилище (Vaultwarden через `secret`)
+# или в окружении systemd, никогда в репозитории.
+*.env
+.env
+config/settings.toml        # реальные настройки (копия из settings.example.toml)
+config/sources.toml         # реальные источники
+config/profile.md           # реальный профиль вкуса
+data/                       # SQLite-база новостей/оценок/реакций
+*.db
+*.sqlite3
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# --- прочее ---
+.DS_Store
+*.log
