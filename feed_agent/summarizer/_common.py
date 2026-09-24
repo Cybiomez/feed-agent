@@ -26,6 +26,17 @@ SUMMARY_INSTRUCTION = (
     "Пиши по-русски, кратко и по делу, без воды и без отсылок к статье.\n\n"
 )
 
+# --- пакетная выжимка нескольких статей за один вызов (экономия: агент грузится 1 раз) ---
+SUMMARY_BATCH_INSTRUCTION = (
+    "Ты — редактор новостного дайджеста на русском языке. Ниже НЕСКОЛЬКО новостей "
+    "(пронумерованы). По КАЖДОЙ сделай выжимку. Ответ — СТРОГО JSON-массив объектов, по "
+    "одному на новость, без пояснений и без markdown-ограждения:\n"
+    '[{"i":<номер>,"headline":"<заголовок-суть по-русски, не кликбейт>",'
+    '"explain":"<1-2 предложения: что произошло и в чём интерес/прорыв>",'
+    '"takeaways":["<короткий тезис>"],"conclusion":"<короткий вывод: почему важно>"}, ...]\n'
+    "Пиши по-русски, кратко, без воды. Охвати ВСЕ номера.\n\n"
+)
+
 # --- группировка дублей (одно событие в разных каналах) ---
 GROUP_INSTRUCTION = (
     "Ниже список новостей (по заголовкам). Сгруппируй те, что освещают ОДНО И ТО ЖЕ "
@@ -50,6 +61,21 @@ def extract_json(text: str, opener: str, closer: str):
     if start == -1 or end == -1 or end < start:
         raise ValueError("нет JSON в ответе")
     return json.loads(text[start : end + 1])
+
+
+def _normalize(obj: dict, item: Item) -> dict | None:
+    """Привести один разобранный объект выжимки к нашему формату (или None, если пусто)."""
+    headline = str(obj.get("headline", "")).strip()[:200]
+    explain = str(obj.get("explain", "")).strip()[:600]
+    conclusion = str(obj.get("conclusion", "")).strip()[:500]
+    takeaways = obj.get("takeaways", [])
+    if not isinstance(takeaways, list):
+        takeaways = []
+    takeaways = [str(t).strip()[:200] for t in takeaways if str(t).strip()][:5]
+    if not explain and not headline:
+        return None
+    return {"title": headline or item.title, "summary": explain,
+            "takeaways": takeaways, "conclusion": conclusion}
 
 
 class PromptSummarizer(Summarizer):
@@ -121,14 +147,33 @@ class PromptSummarizer(Summarizer):
             obj = extract_json(out, "{", "}")
         except (ValueError, TypeError):
             return None
-        headline = str(obj.get("headline", "")).strip()[:200]
-        explain = str(obj.get("explain", "")).strip()[:600]
-        conclusion = str(obj.get("conclusion", "")).strip()[:500]
-        takeaways = obj.get("takeaways", [])
-        if not isinstance(takeaways, list):
-            takeaways = []
-        takeaways = [str(t).strip()[:200] for t in takeaways if str(t).strip()][:5]
-        if not explain and not headline:
-            return None
-        return {"title": headline or item.title, "summary": explain,
-                "takeaways": takeaways, "conclusion": conclusion}
+        return _normalize(obj, item)
+
+    def summarize_batch(self, articles: list[tuple[Item, str]]) -> list[dict | None]:
+        """Сделать выжимки по НЕСКОЛЬКИМ статьям за ОДИН вызов модели (главная экономия:
+        агент/системный промпт грузятся один раз, а не на каждую статью). Возвращает список
+        той же длины: dict|None на каждую статью (None — если модель её не вернула/пусто)."""
+        if not articles:
+            return []
+        parts = []
+        for i, (it, body) in enumerate(articles, 1):
+            text = (body or it.summary or it.title)[:3000]
+            parts.append(f"=== НОВОСТЬ {i} ===\nЗАГОЛОВОК: {it.title}\nТЕКСТ:\n{text}")
+        out = self._complete(SUMMARY_BATCH_INSTRUCTION + "\n\n".join(parts) + "\n")
+        result: list[dict | None] = [None] * len(articles)
+        if not out:
+            return result
+        try:
+            arr = extract_json(out, "[", "]")
+        except (ValueError, TypeError):
+            return result
+        for obj in arr:
+            if not isinstance(obj, dict):
+                continue
+            try:
+                idx = int(obj.get("i")) - 1
+            except (ValueError, TypeError):
+                continue
+            if 0 <= idx < len(articles):
+                result[idx] = _normalize(obj, articles[idx][0])
+        return result

@@ -75,10 +75,10 @@ def enrich(storage: Storage, settings, summarizer, profile: str) -> tuple[int, i
         print(f"enrich: групп {len(groups)} > предохранителя {cap}; остаток уйдёт позже")
         groups = groups[:cap]
 
-    done = 0
+    # Готовим тела всех групп (скачивание статей — это не вызовы модели).
+    prepared = []  # (rep, members, image, combined, sources)
     for group in groups:
         members = [relevant[i] for i in group]
-        # Сливаем тела всех источников группы (взаимодополнение при дублях).
         blocks, image, names = [], "", []
         for m in members:
             body, img = _body_and_image(m)
@@ -88,17 +88,23 @@ def enrich(storage: Storage, settings, summarizer, profile: str) -> tuple[int, i
                 image = img
         combined = ("Материал по одному событию из нескольких источников — объедини и "
                     "взаимодополни:\n\n" if len(members) > 1 else "") + "\n\n".join(blocks)
-        rep = members[0]
-        ru = summarizer.summarize(rep, combined)
-        if not ru or not ru.get("summary"):
-            continue  # не вышло — не роняем прогон, группа уйдёт в следующий раз
-        # уникальные источники в порядке появления
-        uniq = list(dict.fromkeys(names))
-        storage.save_enrichment(rep.uid, combined, image, ru, sources=" + ".join(uniq))
-        # прочих членов группы помечаем обработанными (слиты в rep) — отдельно не всплывут
-        for m in members[1:]:
-            storage.save_enrichment(m.uid, "", "", {})
-        done += 1
+        prepared.append((members[0], members, image, combined,
+                         " + ".join(dict.fromkeys(names))))
+
+    # Выжимки ПАЧКАМИ: одна загрузка модели на пачку вместо вызова на каждую статью
+    # (главная экономия лимита). CHUNK держит размер запроса/ответа управляемым.
+    done = 0
+    CHUNK = 10
+    for start in range(0, len(prepared), CHUNK):
+        chunk = prepared[start:start + CHUNK]
+        results = summarizer.summarize_batch([(rep, combined) for rep, _, _, combined, _ in chunk])
+        for (rep, members, image, combined, sources), ru in zip(chunk, results):
+            if not ru or not ru.get("summary"):
+                continue  # эту не вышло — уйдёт следующим прогоном
+            storage.save_enrichment(rep.uid, combined, image, ru, sources=sources)
+            for m in members[1:]:                      # прочих членов группы — слиты в rep
+                storage.save_enrichment(m.uid, "", "", {})
+            done += 1
     return done, dropped
 
 
