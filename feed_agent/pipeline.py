@@ -18,7 +18,7 @@ from .summarizer import make_summarizer
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def collect(storage: Storage, sources) -> int:

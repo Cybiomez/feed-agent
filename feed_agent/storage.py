@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS kv (          -- служебное состояни�
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # микросекунды — чтобы порядок по времени внутри одного прогона был осмысленным
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 class Storage:
@@ -133,12 +134,27 @@ class Storage:
     # --- обогащение (русская выжимка) ---
 
     def to_enrich(self, limit: int) -> list[Item]:
-        """Свежие ещё не обогащённые и не отправленные новости — кандидаты на выжимку."""
-        cur = self._db.execute(
-            "SELECT i.* FROM items i LEFT JOIN enrichment e ON e.item_uid = i.uid"
+        """Свежие ещё не обогащённые и не отправленные новости — кандидаты на выжимку.
+
+        Честно по источникам: берём по несколько самых свежих с КАЖДОГО источника, чтобы
+        многочисленные ленты (RSS) не вытесняли из отбора малочисленные каналы. Порядок —
+        по «рангу свежести внутри источника» (сначала по одной новейшей с каждого), потом
+        по времени — так топ отбора распределён по источникам."""
+        row = self._db.execute(
+            "SELECT COUNT(DISTINCT source_name) FROM items i"
+            " LEFT JOIN enrichment e ON e.item_uid = i.uid"
             " WHERE i.delivered = 0 AND e.item_uid IS NULL"
-            " ORDER BY i.collected_at DESC LIMIT ?",
-            (limit,),
+        ).fetchone()
+        nsrc = (row[0] if row else 0) or 1
+        per_source = max(3, limit // nsrc)   # сколько новейших брать с каждого источника
+        cur = self._db.execute(
+            "SELECT * FROM ("
+            "  SELECT i.*, ROW_NUMBER() OVER ("
+            "    PARTITION BY i.source_name ORDER BY i.collected_at DESC, i.rowid DESC) AS rn"
+            "  FROM items i LEFT JOIN enrichment e ON e.item_uid = i.uid"
+            "  WHERE i.delivered = 0 AND e.item_uid IS NULL"
+            ") WHERE rn <= ? ORDER BY rn, collected_at DESC LIMIT ?",
+            (per_source, limit),
         )
         return [self._row_to_item(r) for r in cur.fetchall()]
 
