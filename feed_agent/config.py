@@ -47,6 +47,8 @@ class Settings:
     api_base: str = "https://openrouter.ai/api/v1"
     notify_cmd: str = "notify"
     title: str = "🗞️ Дайджест новостей"
+    target_chat: str = ""      # разовый адрес получателя (id чата), пусто = дефолт notify
+    target_thread: str = ""    # тема форума у получателя, если нужна
 
 
 def load_settings() -> Settings:
@@ -72,6 +74,8 @@ def load_settings() -> Settings:
         api_base=mdl.get("api_base", d.api_base),
         notify_cmd=dlv.get("notify_cmd", d.notify_cmd),
         title=dlv.get("title", d.title),
+        target_chat=str(dlv.get("target_chat", d.target_chat)),
+        target_thread=str(dlv.get("target_thread", d.target_thread)),
     )
 
 

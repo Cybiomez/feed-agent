@@ -63,7 +63,9 @@ def run_once(dry_run: bool = False, collect_only: bool = False) -> dict:
 
         if selected:
             text, included = build_digest(selected, settings)
-            ok = deliver(text, settings.notify_cmd, dry_run=dry_run)
+            ok = deliver(text, settings.notify_cmd,
+                         to_chat=settings.target_chat, to_thread=settings.target_thread,
+                         dry_run=dry_run)
             summary["delivered"] = ok
             summary["in_digest"] = len(included)   # реально вошло в сообщение
             # Помечаем доставленными ТОЛЬКО вошедшие — обрезанные хвостом уйдут следующим
