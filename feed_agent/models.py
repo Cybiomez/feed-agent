@@ -69,3 +69,4 @@ class Enriched:
     images: list = field(default_factory=list)         # URL картинок (первая — в сообщение, все — в «Подробнее»)
     video: str = ""                      # ссылка на видео, если есть
     sources: str = ""                    # имена источников через + (запасной показ)
+    is_update: bool = False              # True = тема уже была за 30ч, но есть новое (🔄 Обновление)

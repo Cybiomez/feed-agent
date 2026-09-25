@@ -50,36 +50,23 @@ def _body_and_media(item) -> tuple[str, list, str]:
 
 
 def enrich(storage: Storage, settings, summarizer, profile: str,
-           unlimited: bool = False) -> tuple[int, int, int]:
-    """Отсечь несвежее, просеять по релевантности, сгруппировать дубли и обогатить каждую
-    группу русской выжимкой (слив тексты источников). unlimited=True — без предохранителя
-    (последний прогон дня выдаёт всю очередь). Возвращает (обогащено, отсеяно, старьё)."""
+           unlimited: bool = False) -> dict:
+    """Просеять по релевантности, сгруппировать дубли, СВЕРИТЬ с показанным за N часов (не
+    вбрасывать ту же информацию) и обогатить оставшееся. unlimited=True — без предохранителя
+    (последний прогон дня выдаёт всю очередь). Возвращает статы {enriched,dropped,repeat,updates}."""
+    stats = {"enriched": 0, "dropped": 0, "repeat": 0, "updates": 0}
     candidates = storage.to_enrich(settings.prefilter_pool)
     if not candidates:
-        return 0, 0, 0
+        return stats
 
-    # Окно свежести: старьё в дайджест не идёт (чинит «нет новых постов, а новости есть»).
-    # Помечаем старое обработанным, чтобы не всплывало. Неизвестное время (0) считаем свежим.
-    cutoff = time.time() - settings.freshness_hours * 3600
-    fresh, stale = [], 0
-    for it in candidates:
-        if it.published_ts and it.published_ts < cutoff:
-            storage.save_enrichment(it.uid, "", {})
-            stale += 1
-        else:
-            fresh.append(it)
-    if not fresh:
-        return 0, 0, stale
-
-    relevant = summarizer.filter_relevant(fresh, profile)
+    relevant = summarizer.filter_relevant(candidates, profile)
     relevant_uids = {it.uid for it in relevant}
-    dropped = 0
-    for it in fresh:
+    for it in candidates:
         if it.uid not in relevant_uids:
             storage.save_enrichment(it.uid, "", {})     # нерелевантно — обработано
-            dropped += 1
+            stats["dropped"] += 1
     if not relevant:
-        return 0, dropped, stale
+        return stats
 
     groups = summarizer.group_duplicates(relevant)
     if not unlimited:
@@ -88,10 +75,20 @@ def enrich(storage: Storage, settings, summarizer, profile: str,
             print(f"enrich: групп {len(groups)} > предохранителя {cap}; остаток уйдёт позже")
             groups = groups[:cap]
 
-    # Готовим тела/медиа/ссылки всех групп (скачивание статей — не вызовы модели).
-    prepared = []  # (rep, members, combined, source_links, images, video)
-    for group in groups:
+    # Сверка с ПОКАЗАННЫМ за последние N часов: точный повтор пропускаем, обновление помечаем.
+    reps = [relevant[g[0]] for g in groups]
+    delivered = storage.recent_delivered(settings.freshness_hours)
+    verdicts = summarizer.dedup_against([r.title for r in reps], delivered)
+
+    # Готовим тела/медиа/ссылки для тех групп, что идут дальше (не повтор).
+    prepared = []  # (rep, members, combined, links, images, video, is_update)
+    for group, verdict in zip(groups, verdicts):
         members = [relevant[i] for i in group]
+        if verdict == "repeat":
+            for m in members:
+                storage.save_enrichment(m.uid, "", {})   # уже показано — не повторяем
+            stats["repeat"] += 1
+            continue
         blocks, links, images, video = [], [], [], ""
         for m in members:
             body, imgs, vid = _body_and_media(m)
@@ -104,23 +101,25 @@ def enrich(storage: Storage, settings, summarizer, profile: str,
                 video = vid
         combined = ("Материал по одному событию из нескольких источников — объедини и "
                     "взаимодополни:\n\n" if len(members) > 1 else "") + "\n\n".join(blocks)
-        prepared.append((members[0], members, combined, links, images[:10], video))
+        prepared.append((members[0], members, combined, links, images[:10], video,
+                         verdict == "update"))
 
     # Выжимки ПАЧКАМИ (одна загрузка модели на пачку — экономия лимита).
-    done = 0
     CHUNK = 10
     for start in range(0, len(prepared), CHUNK):
         chunk = prepared[start:start + CHUNK]
-        results = summarizer.summarize_batch([(rep, combined) for rep, _, combined, _, _, _ in chunk])
-        for (rep, members, combined, links, images, video), ru in zip(chunk, results):
+        results = summarizer.summarize_batch([(rep, comb) for rep, _, comb, _, _, _, _ in chunk])
+        for (rep, members, comb, links, images, video, is_upd), ru in zip(chunk, results):
             if not ru or not ru.get("summary"):
                 continue  # эту не вышло — уйдёт следующим прогоном
-            storage.save_enrichment(rep.uid, combined, ru,
-                                    source_links=links, images=images, video=video)
+            storage.save_enrichment(rep.uid, comb, ru, source_links=links, images=images,
+                                    video=video, is_update=is_upd)
             for m in members[1:]:                      # прочих членов группы — слиты в rep
                 storage.save_enrichment(m.uid, "", {})
-            done += 1
-    return done, dropped, stale
+            stats["enriched"] += 1
+            if is_upd:
+                stats["updates"] += 1
+    return stats
 
 
 def run_once(dry_run: bool = False, collect_only: bool = False) -> dict:
@@ -142,9 +141,8 @@ def run_once(dry_run: bool = False, collect_only: bool = False) -> dict:
 
         # Фильтр по вкусу + обогащение (в сухом прогоне — офлайн-заглушкой).
         summarizer = make_summarizer(settings, force_stub=dry_run)
-        enriched_n, dropped_n, stale_n = enrich(storage, settings, summarizer, profile)
-        summary.update(summarizer=summarizer.name, enriched=enriched_n,
-                       dropped=dropped_n, stale=stale_n)
+        st = enrich(storage, settings, summarizer, profile)
+        summary.update(summarizer=summarizer.name, **st)
 
         # Дайджест из обогащённых, ещё не отправленных новостей.
         items = storage.enriched_for_digest(settings.digest_max_items)

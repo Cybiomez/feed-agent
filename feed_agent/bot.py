@@ -54,12 +54,10 @@ def _prepare_digest(unlimited: bool = False) -> tuple[list[Enriched], dict]:
     try:
         collect(storage, sources)
         storage.purge_old(settings.history_days)
-        enriched, dropped, stale = enrich(storage, settings, make_summarizer(settings),
-                                          profile, unlimited=unlimited)
+        st = enrich(storage, settings, make_summarizer(settings), profile, unlimited=unlimited)
         items = storage.enriched_for_digest(1000)
-        cutoff = time.time() - settings.freshness_hours * 3600
-        pending = storage.pending_count(cutoff)
-        return items, {"enriched": enriched, "dropped": dropped, "stale": stale, "pending": pending}
+        st["pending"] = storage.pending_count()
+        return items, st
     finally:
         storage.close()
 
@@ -115,8 +113,10 @@ def _sources_html(e: Enriched) -> str:
 
 
 def _item_caption(e: Enriched) -> str:
-    """Основное сообщение новости: чистый заголовок + строка ключевых цифр + источники."""
-    parts = [f"<b>{escape(e.ru_title)}</b>"]
+    """Основное сообщение новости: чистый заголовок + строка ключевых цифр + источники.
+    Для обновления уже показанной темы — пометка 🔄."""
+    mark = "🔄 " if e.is_update else ""
+    parts = [f"{mark}<b>{escape(e.ru_title)}</b>"]
     if e.ru_key:
         parts.append(escape(e.ru_key))
     parts.append(_sources_html(e))
@@ -274,16 +274,17 @@ async def send_digest(bot: Bot, chat_id: int, thread_id: int | None, final: bool
 
     # Строка видимости очереди — чтобы регулировать лимит по утру/дню.
     if sent or stats["pending"] or final:
-        status = (f"📊 Показано: {len(sent)} · в очереди ещё: {stats['pending']}"
-                  f" · устарело за прогон: {stats['stale']}")
+        status = (f"📊 Показано: {len(sent)} · в очереди: {stats['pending']}"
+                  f" · повторов отсеяно: {stats['repeat']} · обновлений: {stats['updates']}")
         status += ("\n✅ Финальный прогон дня — очередь выдана полностью." if final
                    else "\nОстаток уйдёт следующими прогонами (финальный в 17:30 отдаёт всё).")
         try:
             await bot.send_message(chat_id, status, message_thread_id=thread_id)
         except Exception:
             pass
-    log.info("digest%s: отправлено %d, в очереди %d, устарело %d",
-             " (final)" if final else "", len(sent), stats["pending"], stats["stale"])
+    log.info("digest%s: отправлено %d, в очереди %d, повторов %d, обновлений %d",
+             " (final)" if final else "", len(sent), stats["pending"],
+             stats["repeat"], stats["updates"])
     return len(sent)
 
 

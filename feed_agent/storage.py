@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS enrichment (  -- русская выжимка по �
     images       TEXT DEFAULT '',        -- JSON-список URL картинок (первая — в сообщение)
     video        TEXT DEFAULT '',        -- ссылка на видео, если есть
     sources      TEXT DEFAULT '',        -- имена источников через " + " (запасной показ)
+    is_update    INTEGER DEFAULT 0,      -- 1 = тема уже была за 30ч, но с новым (🔄 Обновление)
     enriched_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reactions (   -- этап 2: 👍/👎 на пункты дайджеста
@@ -93,7 +94,7 @@ class Storage:
                       "video": "TEXT DEFAULT ''"})
         add("enrichment", {"sources": "TEXT DEFAULT ''", "ru_key": "TEXT DEFAULT ''",
                            "source_links": "TEXT DEFAULT ''", "images": "TEXT DEFAULT ''",
-                           "video": "TEXT DEFAULT ''"})
+                           "video": "TEXT DEFAULT ''", "is_update": "INTEGER DEFAULT 0"})
 
     def close(self) -> None:
         self._db.close()
@@ -186,21 +187,22 @@ class Storage:
 
     def save_enrichment(self, uid: str, fulltext: str, ru: dict,
                         source_links: list | None = None, images: list | None = None,
-                        video: str = "") -> None:
+                        video: str = "", is_update: bool = False) -> None:
         """Сохранить результат выжимки. ru = {title, summary, key, takeaways[list], conclusion}.
-        source_links = [{name,url}] (ссылки в перечне источников); images = список URL картинок.
-        Пустой ru (без summary) = пометка «обработано, но не для дайджеста» (отсев/слияние)."""
+        source_links = [{name,url}]; images = список URL; is_update = тема уже была (🔄).
+        Пустой ru (без summary) = пометка «обработано, но не для дайджеста» (отсев/слияние/повтор)."""
         links = source_links or []
         names = " + ".join(dict.fromkeys(l.get("name", "") for l in links if l.get("name")))
         self._db.execute(
             "INSERT OR REPLACE INTO enrichment"
             " (item_uid, fulltext, ru_title, ru_summary, ru_key, ru_takeaways, ru_conclusion,"
-            "  source_links, images, video, sources, enriched_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "  source_links, images, video, sources, is_update, enriched_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (uid, fulltext or "", ru.get("title", ""), ru.get("summary", ""),
              ru.get("key", ""), json.dumps(ru.get("takeaways", []), ensure_ascii=False),
              ru.get("conclusion", ""), json.dumps(links, ensure_ascii=False),
-             json.dumps(images or [], ensure_ascii=False), video or "", names, _now()),
+             json.dumps(images or [], ensure_ascii=False), video or "", names,
+             1 if is_update else 0, _now()),
         )
         self._db.commit()
 
@@ -208,7 +210,8 @@ class Storage:
         """Обогащённые, но ещё не отправленные новости — то, что пойдёт в дайджест."""
         cur = self._db.execute(
             "SELECT i.uid, i.source_name, i.url, e.ru_title, e.ru_summary, e.ru_key,"
-            "       e.ru_takeaways, e.ru_conclusion, e.source_links, e.images, e.video, e.sources"
+            "       e.ru_takeaways, e.ru_conclusion, e.source_links, e.images, e.video,"
+            "       e.sources, e.is_update"
             " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
             " WHERE i.delivered = 0 AND e.ru_summary != ''"
             " ORDER BY i.collected_at DESC LIMIT ?",
@@ -233,13 +236,26 @@ class Storage:
             source_links=js("source_links", []), images=js("images", []),
             video=(r["video"] if "video" in keys and r["video"] else ""),
             sources=sources,
+            is_update=bool(r["is_update"]) if "is_update" in keys and r["is_update"] else False,
         )
+
+    def recent_delivered(self, hours: int) -> list[str]:
+        """Заголовки новостей, ПОКАЗАННЫХ в дайджесте за последние N часов — для сверки, чтобы
+        не вбрасывать одну и ту же информацию повторно."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="microseconds")
+        cur = self._db.execute(
+            "SELECT i.title FROM items i JOIN enrichment e ON e.item_uid = i.uid"
+            " WHERE i.delivered = 1 AND e.ru_summary != '' AND e.enriched_at >= ?",
+            (cutoff,),
+        )
+        return [r["title"] for r in cur.fetchall()]
 
     def get_enriched(self, uid: str) -> Enriched | None:
         """Одна обогащённая новость по id — для разворота «Подробнее»."""
         cur = self._db.execute(
             "SELECT i.uid, i.source_name, i.url, e.ru_title, e.ru_summary, e.ru_key,"
-            "       e.ru_takeaways, e.ru_conclusion, e.source_links, e.images, e.video, e.sources"
+            "       e.ru_takeaways, e.ru_conclusion, e.source_links, e.images, e.video,"
+            "       e.sources, e.is_update"
             " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
             " WHERE i.uid = ? AND e.ru_summary != ''",
             (uid,),
@@ -247,14 +263,12 @@ class Storage:
         r = cur.fetchone()
         return self._row_to_enriched(r) if r else None
 
-    def pending_count(self, cutoff_ts: float) -> int:
-        """Сколько свежих новостей ещё в очереди: не доставлены, не обработаны, в окне свежести
-        (или без известного времени). Это «остаток», который видит пользователь для регулировки."""
+    def pending_count(self) -> int:
+        """Сколько новостей ещё в очереди: не доставлены и не обработаны. Это «остаток»,
+        который видит пользователь для регулировки лимита."""
         row = self._db.execute(
             "SELECT COUNT(*) AS c FROM items i LEFT JOIN enrichment e ON e.item_uid = i.uid"
             " WHERE i.delivered = 0 AND e.item_uid IS NULL"
-            " AND (i.published_ts = 0 OR i.published_ts >= ?)",
-            (cutoff_ts,),
         ).fetchone()
         return row["c"] if row else 0
 

@@ -39,6 +39,17 @@ SUMMARY_BATCH_INSTRUCTION = (
     "Пиши по-русски, кратко, без воды. Охвати ВСЕ номера.\n\n"
 )
 
+# --- сверка с уже показанным за 30ч (чтобы не вбрасывать ту же информацию) ---
+DEDUP_INSTRUCTION = (
+    "Задача — не показывать повторно одну и ту же новость. Ниже 'УЖЕ ПОКАЗАННЫЕ' новости "
+    "(за последние часы) и 'НОВЫЕ' кандидаты. Для КАЖДОГО нового реши:\n"
+    "- 'repeat' — та же новость, что уже показана, без нового содержания;\n"
+    "- 'update' — та же тема/событие, но есть НОВЫЕ детали, развитие, уточнение;\n"
+    "- 'new' — не пересекается с показанными.\n"
+    "Верни СТРОГО JSON-массив по новым, по одному объекту на кандидата: "
+    '[{"i":<номер>,"v":"new|repeat|update"}]. При сомнении — "new".\n\n'
+)
+
 # --- группировка дублей (одно событие в разных каналах) ---
 GROUP_INSTRUCTION = (
     "Ниже список новостей (по заголовкам). Сгруппируй те, что освещают ОДНО И ТО ЖЕ "
@@ -139,6 +150,34 @@ class PromptSummarizer(Summarizer):
         if seen != set(range(n)):
             return singletons  # покрыты не все — безопаснее без слияния
         return result
+
+    def dedup_against(self, new_titles: list[str], delivered_titles: list[str]) -> list[str]:
+        """Сверить новые заголовки с показанными за период. Возвращает вердикт на каждый новый:
+        'new' | 'repeat' | 'update'. Пусто/сбой — считаем всё 'new' (ничего не теряем)."""
+        verdicts = ["new"] * len(new_titles)
+        if not new_titles or not delivered_titles:
+            return verdicts
+        shown = "\n".join(f"- {t}" for t in delivered_titles)
+        new = "\n".join(f"{i}. {t}" for i, t in enumerate(new_titles, 1))
+        out = self._complete(DEDUP_INSTRUCTION + "=== УЖЕ ПОКАЗАННЫЕ ===\n" + shown +
+                             "\n\n=== НОВЫЕ ===\n" + new + "\n")
+        if not out:
+            return verdicts
+        try:
+            arr = extract_json(out, "[", "]")
+        except (ValueError, TypeError):
+            return verdicts
+        for obj in arr:
+            if not isinstance(obj, dict):
+                continue
+            try:
+                idx = int(obj.get("i")) - 1
+            except (ValueError, TypeError):
+                continue
+            v = str(obj.get("v", "new")).strip().lower()
+            if 0 <= idx < len(verdicts) and v in ("new", "repeat", "update"):
+                verdicts[idx] = v
+        return verdicts
 
     def summarize(self, item: Item, fulltext: str) -> dict | None:
         body = fulltext or item.summary or item.title
