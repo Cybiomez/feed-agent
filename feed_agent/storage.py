@@ -247,6 +247,17 @@ class Storage:
         r = cur.fetchone()
         return self._row_to_enriched(r) if r else None
 
+    def pending_count(self, cutoff_ts: float) -> int:
+        """Сколько свежих новостей ещё в очереди: не доставлены, не обработаны, в окне свежести
+        (или без известного времени). Это «остаток», который видит пользователь для регулировки."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS c FROM items i LEFT JOIN enrichment e ON e.item_uid = i.uid"
+            " WHERE i.delivered = 0 AND e.item_uid IS NULL"
+            " AND (i.published_ts = 0 OR i.published_ts >= ?)",
+            (cutoff_ts,),
+        ).fetchone()
+        return row["c"] if row else 0
+
     def add_reaction(self, uid: str, reaction: str) -> None:
         """Сохранить реакцию 👍/👎 на новость (для будущего обучения вкуса)."""
         self._db.execute(

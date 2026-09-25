@@ -49,9 +49,11 @@ def _body_and_media(item) -> tuple[str, list, str]:
     return (fulltext or item.summary or item.title), imgs, ""
 
 
-def enrich(storage: Storage, settings, summarizer, profile: str) -> tuple[int, int, int]:
+def enrich(storage: Storage, settings, summarizer, profile: str,
+           unlimited: bool = False) -> tuple[int, int, int]:
     """Отсечь несвежее, просеять по релевантности, сгруппировать дубли и обогатить каждую
-    группу русской выжимкой (слив тексты источников). Возвращает (обогащено, отсеяно, старьё)."""
+    группу русской выжимкой (слив тексты источников). unlimited=True — без предохранителя
+    (последний прогон дня выдаёт всю очередь). Возвращает (обогащено, отсеяно, старьё)."""
     candidates = storage.to_enrich(settings.prefilter_pool)
     if not candidates:
         return 0, 0, 0
@@ -80,10 +82,11 @@ def enrich(storage: Storage, settings, summarizer, profile: str) -> tuple[int, i
         return 0, dropped, stale
 
     groups = summarizer.group_duplicates(relevant)
-    cap = settings.enrich_per_run
-    if len(groups) > cap:
-        print(f"enrich: групп {len(groups)} > предохранителя {cap}; остаток уйдёт позже")
-        groups = groups[:cap]
+    if not unlimited:
+        cap = settings.enrich_per_run
+        if len(groups) > cap:
+            print(f"enrich: групп {len(groups)} > предохранителя {cap}; остаток уйдёт позже")
+            groups = groups[:cap]
 
     # Готовим тела/медиа/ссылки всех групп (скачивание статей — не вызовы модели).
     prepared = []  # (rep, members, combined, source_links, images, video)

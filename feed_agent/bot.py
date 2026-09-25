@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from html import escape
 
 from aiogram import Bot, Dispatcher, F
@@ -31,18 +32,21 @@ from .summarizer import make_summarizer
 
 log = logging.getLogger("feed-agent.bot")
 
-# Прогоны 3 раза в день: 07:30, 13:30, 17:30 МСК = 04:30, 10:30, 14:30 UTC
-# (бокс в UTC; МСК = UTC+3, без переходов на летнее время).
-SCHEDULE_HOURS_UTC = "4,10,14"
-SCHEDULE_MINUTE = 30
+# Рассылка 3×/день (МСК = UTC+3, без переходов): 07:30 и 13:30 — с лимитом; 17:30 —
+# последний прогон дня, БЕЗ лимита (выдаёт всю очередь, чтобы ничего не потерять).
+DIGEST_HOURS_UTC = "4,10"      # 07:30, 13:30 МСК — с предохранителем
+FINAL_HOUR_UTC = "14"          # 17:30 МСК — финальный, без лимита
+DIGEST_MINUTE = 30
+# Частый сбор в базу (дёшево, без модели) — чтобы посты не «уехали» из t.me/s/ между рассылками.
+COLLECT_MINUTE = 5             # каждый час в :05
 
 
 # --- синхронная работа с БД/сетью (вызывается через asyncio.to_thread) ---
 
-def _prepare_digest() -> list[Enriched]:
-    """Один прогон конвейера (сбор → фильтр → обогащение) и выборка готового к отправке.
-    Возвращает обогащённые новости (данные, без соединения с БД). Доставку/пометку —
-    делает бот после успешной отправки."""
+def _prepare_digest(unlimited: bool = False) -> tuple[list[Enriched], dict]:
+    """Прогон конвейера (сбор → свежесть → фильтр → обогащение) и выборка готового к отправке.
+    unlimited=True — обработать всю очередь (финальный прогон дня). Возвращает (новости, статы),
+    статы = {enriched, dropped, stale, pending} для строки видимости очереди."""
     settings = config.load_settings()
     sources = config.load_sources()
     profile = config.load_profile()
@@ -50,8 +54,24 @@ def _prepare_digest() -> list[Enriched]:
     try:
         collect(storage, sources)
         storage.purge_old(settings.history_days)
-        enrich(storage, settings, make_summarizer(settings), profile)
-        return storage.enriched_for_digest(500)   # всё готовое; постранично отправит бот
+        enriched, dropped, stale = enrich(storage, settings, make_summarizer(settings),
+                                          profile, unlimited=unlimited)
+        items = storage.enriched_for_digest(1000)
+        cutoff = time.time() - settings.freshness_hours * 3600
+        pending = storage.pending_count(cutoff)
+        return items, {"enriched": enriched, "dropped": dropped, "stale": stale, "pending": pending}
+    finally:
+        storage.close()
+
+
+def _collect_only() -> int:
+    """Только собрать новые посты в базу (частый дешёвый заход, без модели/рассылки)."""
+    settings = config.load_settings()
+    storage = Storage()
+    try:
+        n = collect(storage, config.load_sources())
+        storage.purge_old(settings.history_days)
+        return n
     finally:
         storage.close()
 
@@ -225,13 +245,10 @@ def build_dispatcher(chat_id: int, thread_id: int | None,
     return dp
 
 
-async def send_digest(bot: Bot, chat_id: int, thread_id: int | None) -> int:
-    """Прогнать конвейер и отправить КАЖДУЮ новость отдельным сообщением (фото+подпись+кнопки
-    или текст+кнопки). Ничего не режем. Возвращает число отправленных."""
-    items = await asyncio.to_thread(_prepare_digest)
-    if not items:
-        log.info("digest: нечего слать")
-        return 0
+async def send_digest(bot: Bot, chat_id: int, thread_id: int | None, final: bool = False) -> int:
+    """Прогнать конвейер и отправить КАЖДУЮ новость отдельным сообщением. final=True —
+    финальный прогон дня: без лимита, выдаёт всю очередь. В конце — строка видимости очереди."""
+    items, stats = await asyncio.to_thread(_prepare_digest, final)
     sent: list[str] = []
     for e in items:
         caption = _item_caption(e)
@@ -254,8 +271,26 @@ async def send_digest(bot: Bot, chat_id: int, thread_id: int | None) -> int:
         await asyncio.sleep(3.0)   # лимит Telegram на группу ~20 сообщений/мин
     if sent:
         await asyncio.to_thread(_mark_delivered, sent)
-    log.info("digest: отправлено %d (по одной)", len(sent))
+
+    # Строка видимости очереди — чтобы регулировать лимит по утру/дню.
+    if sent or stats["pending"] or final:
+        status = (f"📊 Показано: {len(sent)} · в очереди ещё: {stats['pending']}"
+                  f" · устарело за прогон: {stats['stale']}")
+        status += ("\n✅ Финальный прогон дня — очередь выдана полностью." if final
+                   else "\nОстаток уйдёт следующими прогонами (финальный в 17:30 отдаёт всё).")
+        try:
+            await bot.send_message(chat_id, status, message_thread_id=thread_id)
+        except Exception:
+            pass
+    log.info("digest%s: отправлено %d, в очереди %d, устарело %d",
+             " (final)" if final else "", len(sent), stats["pending"], stats["stale"])
     return len(sent)
+
+
+async def collect_job() -> None:
+    """Частый дешёвый сбор в базу (без модели/рассылки) — чтобы посты не «уехали» из t.me/s/."""
+    n = await asyncio.to_thread(_collect_only)
+    log.info("collect: +%d новых", n)
 
 
 async def main() -> None:
@@ -274,14 +309,22 @@ async def main() -> None:
     dp = build_dispatcher(chat_id, thread_id, me.username, me.id)
     log.info("бот @%s — реагирует на упоминание (@%s) в сообщении", me.username, me.username)
 
-    # Расписание прогонов внутри бота (он всегда на связи для callback'ов).
+    # Расписание внутри бота (он всегда на связи для callback'ов).
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_digest, CronTrigger(hour=SCHEDULE_HOURS_UTC, minute=SCHEDULE_MINUTE),
-                      args=[bot, chat_id, thread_id], id="digest",
+    # Частый сбор в базу (дёшево, без модели) — чтобы ничего не «уехало» из t.me/s/.
+    scheduler.add_job(collect_job, CronTrigger(minute=COLLECT_MINUTE), id="collect",
                       max_instances=1, coalesce=True)
+    # Утро/день — рассылка с лимитом.
+    scheduler.add_job(send_digest, CronTrigger(hour=DIGEST_HOURS_UTC, minute=DIGEST_MINUTE),
+                      args=[bot, chat_id, thread_id], kwargs={"final": False},
+                      id="digest", max_instances=1, coalesce=True)
+    # Вечер — финальный прогон, без лимита: выдаёт всю очередь.
+    scheduler.add_job(send_digest, CronTrigger(hour=FINAL_HOUR_UTC, minute=DIGEST_MINUTE),
+                      args=[bot, chat_id, thread_id], kwargs={"final": True},
+                      id="digest_final", max_instances=1, coalesce=True)
     scheduler.start()
-    log.info("бот запущен; прогоны 07:30/13:30/17:30 МСК (%s:%s UTC)",
-             SCHEDULE_HOURS_UTC, SCHEDULE_MINUTE)
+    log.info("бот запущен; сбор ежечасно (:%s), рассылка 07:30/13:30 (лимит) + 17:30 (вся очередь) МСК",
+             COLLECT_MINUTE)
 
     await dp.start_polling(bot)
 
