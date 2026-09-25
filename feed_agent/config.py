@@ -66,6 +66,7 @@ class Settings:
     title: str = "🗞️ Дайджест новостей"
     target_chat: str = ""      # разовый адрес получателя (id чата), пусто = дефолт notify
     target_thread: str = ""    # тема форума у получателя, если нужна
+    owner_id: int = 0          # Telegram-id владельца: только он может дёргать /news (0 = все)
 
 
 def load_settings() -> Settings:
@@ -78,6 +79,7 @@ def load_settings() -> Settings:
     mdl = raw.get("model", {})
     smz = raw.get("summarizer", {})
     dlv = raw.get("delivery", {})
+    acc = raw.get("access", {})
     d = Settings()  # дефолты
     return Settings(
         max_items_per_run=run.get("max_items_per_run", d.max_items_per_run),
@@ -102,6 +104,7 @@ def load_settings() -> Settings:
         title=dlv.get("title", d.title),
         target_chat=str(dlv.get("target_chat", d.target_chat)),
         target_thread=str(dlv.get("target_thread", d.target_thread)),
+        owner_id=int(acc.get("owner_id", d.owner_id) or 0),
     )
 
 

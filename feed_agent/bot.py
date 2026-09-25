@@ -176,59 +176,67 @@ def _command_word(text: str) -> str:
 
 
 def build_dispatcher(chat_id: int, thread_id: int | None,
-                     bot_username: str, bot_id: int) -> Dispatcher:
+                     bot_username: str, bot_id: int, owner_id: int = 0) -> Dispatcher:
     dp = Dispatcher()
 
-    async def _deliver(msg: Message) -> None:
-        await msg.answer("Собираю дайджест…")   # answer сам отвечает в ту же тему
-        n = await send_digest(msg.bot, chat_id, thread_id)
-        if n == 0:
-            await msg.answer("Пока нечего слать — свежих новостей по профилю нет.")
+    def _is_owner(user) -> bool:
+        return not owner_id or (user is not None and user.id == owner_id)
 
     @dp.message(F.text | F.caption)
     async def on_command(msg: Message) -> None:
-        """Команда срабатывает, только если к боту обратились ЯВНО (тег или /cmd@бот) И это
-        известная команда. Пример: «@MyCeliumCharlieNewsBot /news» или «/news@…»."""
+        """Команда срабатывает, только если к боту обратились ЯВНО (тег или /cmd@бот),
+        это известная команда И зовёт владелец. Ответ идёт ТУДА, где вызвали."""
         if not _addressed_to_me(msg, bot_username, bot_id):
             return
-        if _command_word(msg.text or msg.caption or "") == "news":
-            await _deliver(msg)
+        if not _is_owner(msg.from_user):
+            return  # чужой — молчим
+        if _command_word(msg.text or msg.caption or "") != "news":
+            return
+        dst_chat, dst_thread = msg.chat.id, msg.message_thread_id
+        await msg.answer("Собираю дайджест…")
+        n = await send_digest(msg.bot, dst_chat, dst_thread, final=False)
+        if n == 0:
+            await msg.answer("Пока нечего слать — свежих новостей по профилю нет.")
 
     @dp.callback_query(F.data.startswith("det:"))
     async def on_detail(cb: CallbackQuery) -> None:
+        if not _is_owner(cb.from_user):
+            await cb.answer("Только для владельца", show_alert=False)
+            return
         uid = cb.data.split(":", 1)[1]
         e = await asyncio.to_thread(_get_enriched, uid)
         if not e:
             await cb.answer("Новость не найдена", show_alert=False)
             return
+        # отвечаем в тот чат/тему, где нажали кнопку
+        dc = cb.message.chat.id if cb.message else chat_id
+        dt = cb.message.message_thread_id if cb.message else thread_id
         text = _detail_text(e)
         imgs = e.images or []
         try:
             if len(imgs) >= 2:
-                # альбом (до 10) по URL; подпись на первом фото, если влезает
                 media = []
                 for idx, u in enumerate(imgs[:10]):
                     cap = text if (idx == 0 and len(text) <= 1024) else None
                     media.append(InputMediaPhoto(media=u, caption=cap, parse_mode="HTML"))
-                await cb.bot.send_media_group(chat_id, media, message_thread_id=thread_id)
+                await cb.bot.send_media_group(dc, media, message_thread_id=dt)
                 if len(text) > 1024:
-                    await cb.bot.send_message(chat_id, text, message_thread_id=thread_id,
+                    await cb.bot.send_message(dc, text, message_thread_id=dt,
                                               disable_web_page_preview=True)
             elif len(imgs) == 1 and len(text) <= 1024:
-                await cb.bot.send_photo(chat_id, photo=imgs[0], caption=text,
-                                        message_thread_id=thread_id)
+                await cb.bot.send_photo(dc, photo=imgs[0], caption=text, message_thread_id=dt)
             else:
                 if imgs:
                     try:
-                        await cb.bot.send_photo(chat_id, photo=imgs[0], message_thread_id=thread_id)
+                        await cb.bot.send_photo(dc, photo=imgs[0], message_thread_id=dt)
                     except Exception:
                         pass
-                await cb.bot.send_message(chat_id, text, message_thread_id=thread_id,
+                await cb.bot.send_message(dc, text, message_thread_id=dt,
                                           disable_web_page_preview=True)
         except Exception as ex:
             log.warning("detail send failed: %s", ex)
-            try:  # фолбэк — только текст
-                await cb.bot.send_message(chat_id, text, message_thread_id=thread_id,
+            try:
+                await cb.bot.send_message(dc, text, message_thread_id=dt,
                                           disable_web_page_preview=True)
             except Exception:
                 pass
@@ -238,6 +246,9 @@ def build_dispatcher(chat_id: int, thread_id: int | None,
 
     @dp.callback_query(F.data.startswith("up:") | F.data.startswith("down:"))
     async def on_react(cb: CallbackQuery) -> None:
+        if not _is_owner(cb.from_user):
+            await cb.answer("Только для владельца", show_alert=False)
+            return
         action, uid = cb.data.split(":", 1)
         await asyncio.to_thread(_react, uid, "up" if action == "up" else "down")
         await cb.answer("👍 учтено" if action == "up" else "👎 учтено")
@@ -307,8 +318,9 @@ async def main() -> None:
 
     bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
     me = await bot.get_me()
-    dp = build_dispatcher(chat_id, thread_id, me.username, me.id)
-    log.info("бот @%s — реагирует на упоминание (@%s) в сообщении", me.username, me.username)
+    dp = build_dispatcher(chat_id, thread_id, me.username, me.id, settings.owner_id)
+    log.info("бот @%s — /news по тегу и только от владельца (%s), ответ в чате вызова",
+             me.username, settings.owner_id or "все")
 
     # Расписание внутри бота (он всегда на связи для callback'ов).
     scheduler = AsyncIOScheduler()
