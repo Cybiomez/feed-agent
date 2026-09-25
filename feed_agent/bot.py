@@ -44,7 +44,7 @@ COLLECT_MINUTE = 5             # каждый час в :05
 
 # --- синхронная работа с БД/сетью (вызывается через asyncio.to_thread) ---
 
-def _prepare_digest(unlimited: bool = False) -> tuple[list[Enriched], dict]:
+def _prepare_digest(unlimited: bool = False, cap: int | None = None) -> tuple[list[Enriched], dict]:
     """Прогон конвейера (сбор → свежесть → фильтр → обогащение) и выборка готового к отправке.
     unlimited=True — обработать всю очередь (финальный прогон дня). Возвращает (новости, статы),
     статы = {enriched, dropped, stale, pending} для строки видимости очереди."""
@@ -55,7 +55,8 @@ def _prepare_digest(unlimited: bool = False) -> tuple[list[Enriched], dict]:
     try:
         collect(storage, sources)
         storage.purge_old(settings.history_days)
-        st = enrich(storage, settings, make_summarizer(settings), profile, unlimited=unlimited)
+        st = enrich(storage, settings, make_summarizer(settings), profile,
+                    unlimited=unlimited, cap_override=cap)
         items = storage.enriched_for_digest(1000)
         st["pending"] = storage.pending_count()
         return items, st
@@ -254,6 +255,25 @@ def build_dispatcher(chat_id: int, thread_id: int | None,
         await asyncio.to_thread(_react, uid, "up" if action == "up" else "down")
         await cb.answer("👍 учтено" if action == "up" else "👎 учтено")
 
+    @dp.callback_query(F.data.startswith("more:"))
+    async def on_more(cb: CallbackQuery) -> None:
+        """Кнопки статус-строки: подтянуть ещё N новостей или всю очередь — в тот же чат."""
+        if not _is_owner(cb.from_user):
+            await cb.answer("Только для владельца", show_alert=False)
+            return
+        dc = cb.message.chat.id if cb.message else chat_id
+        dt = cb.message.message_thread_id if cb.message else thread_id
+        arg = cb.data.split(":", 1)[1]
+        await cb.answer("Собираю…")
+        if arg == "all":
+            await send_digest(cb.bot, dc, dt, final=True)
+        else:
+            try:
+                n = int(arg)
+            except ValueError:
+                n = 10
+            await send_digest(cb.bot, dc, dt, cap=n)
+
     return dp
 
 
@@ -287,10 +307,12 @@ async def _deliver_item(bot: Bot, dc: int, dt: int | None, e: Enriched) -> bool:
     return False
 
 
-async def send_digest(bot: Bot, chat_id: int, thread_id: int | None, final: bool = False) -> int:
-    """Прогнать конвейер и отправить КАЖДУЮ новость отдельным сообщением. final=True —
-    финальный прогон дня: без лимита, выдаёт всю очередь. В конце — строка видимости очереди."""
-    items, stats = await asyncio.to_thread(_prepare_digest, final)
+async def send_digest(bot: Bot, chat_id: int, thread_id: int | None,
+                      final: bool = False, cap: int | None = None) -> int:
+    """Прогнать конвейер и отправить КАЖДУЮ новость отдельным сообщением. final=True — без
+    лимита (вся очередь); cap — свой лимит на прогон (кнопка «ещё N»). В конце — строка
+    видимости очереди с кнопками «ещё 10 / вся очередь», если очередь не пуста."""
+    items, stats = await asyncio.to_thread(_prepare_digest, final, cap)
     sent: list[str] = []
     for e in items:
         if await _deliver_item(bot, chat_id, thread_id, e):
@@ -302,12 +324,17 @@ async def send_digest(bot: Bot, chat_id: int, thread_id: int | None, final: bool
     # Строка видимости очереди — чтобы регулировать лимит по утру/дню.
     if sent or stats["pending"] or final:
         status = (f"📊 Показано: {len(sent)} · в очереди: {stats['pending']}"
-                  f" · повторов отсеяно: {stats['repeat']} · обновлений: {stats['updates']}")
-        status += ("\n✅ Финальный прогон дня — очередь выдана полностью." if final
-                   else "\nОстаток уйдёт следующими прогонами (финальный в 17:30 отдаёт всё).")
+                  f" · повторов: {stats['repeat']} · обновлений: {stats['updates']}")
+        kb = None
+        if stats["pending"] > 0:              # есть остаток — даём кнопки подтянуть ещё
+            b = InlineKeyboardBuilder()
+            b.row(InlineKeyboardButton(text="Показать ещё 10", callback_data="more:10"),
+                  InlineKeyboardButton(text="Показать всю очередь", callback_data="more:all"))
+            kb = b.as_markup()
         for _ in range(5):                    # строку статуса тоже шлём с учётом флуд-лимита
             try:
-                await bot.send_message(chat_id, status, message_thread_id=thread_id)
+                await bot.send_message(chat_id, status, message_thread_id=thread_id,
+                                       reply_markup=kb)
                 break
             except TelegramRetryAfter as fl:
                 await asyncio.sleep(fl.retry_after + 1)

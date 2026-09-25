@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import requests
 
@@ -28,16 +29,27 @@ class OpenRouterSummarizer(PromptSummarizer):
             )
 
     def _complete(self, prompt: str) -> str | None:
-        try:
-            resp = requests.post(
-                f"{self.api_base}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}",
-                         "Content-Type": "application/json", "X-Title": "feed-agent"},
-                json={"model": self.model, "temperature": 0,
-                      "messages": [{"role": "user", "content": prompt}]},
-                timeout=self.timeout_s,
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-        except Exception:
-            return None
+        # Бесплатный тир любит отвечать 429 (лимит частоты) — ждём и повторяем, иначе пачки
+        # выжимок молча теряются. Уважаем Retry-After, если сервер его даёт.
+        for attempt in range(4):
+            try:
+                resp = requests.post(
+                    f"{self.api_base}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}",
+                             "Content-Type": "application/json", "X-Title": "feed-agent"},
+                    json={"model": self.model, "temperature": 0,
+                          "messages": [{"role": "user", "content": prompt}]},
+                    timeout=self.timeout_s,
+                )
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    wait = int(resp.headers.get("Retry-After", 0) or 0) or (2 ** attempt) * 3
+                    time.sleep(min(wait, 30))
+                    continue
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+            except Exception:
+                if attempt < 3:
+                    time.sleep(3)
+                    continue
+                return None
+        return None

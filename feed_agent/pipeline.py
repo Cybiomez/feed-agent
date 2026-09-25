@@ -50,7 +50,7 @@ def _body_and_media(item) -> tuple[str, list, str]:
 
 
 def enrich(storage: Storage, settings, summarizer, profile: str,
-           unlimited: bool = False) -> dict:
+           unlimited: bool = False, cap_override: int | None = None) -> dict:
     """Просеять по релевантности, сгруппировать дубли, СВЕРИТЬ с показанным за N часов (не
     вбрасывать ту же информацию) и обогатить оставшееся. unlimited=True — без предохранителя
     (последний прогон дня выдаёт всю очередь). Возвращает статы {enriched,dropped,repeat,updates}."""
@@ -70,9 +70,9 @@ def enrich(storage: Storage, settings, summarizer, profile: str,
 
     groups = summarizer.group_duplicates(relevant)
     if not unlimited:
-        cap = settings.enrich_per_run
+        cap = cap_override if cap_override else settings.enrich_per_run
         if len(groups) > cap:
-            print(f"enrich: групп {len(groups)} > предохранителя {cap}; остаток уйдёт позже")
+            print(f"enrich: групп {len(groups)} > лимита {cap}; остаток уйдёт позже")
             groups = groups[:cap]
 
     # Сверка с ПОКАЗАННЫМ за последние N часов: точный повтор пропускаем, обновление помечаем.
