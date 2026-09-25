@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import re
 from html import unescape
 
@@ -11,6 +12,26 @@ from ..models import Item
 from .base import Collector
 
 _TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _entry_ts(e) -> float:
+    """Время публикации записи в epoch-секундах (0, если лента не дала)."""
+    st = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None)
+    return float(calendar.timegm(st)) if st else 0.0
+
+
+def _entry_image(e) -> list[str]:
+    """URL картинки из медиа-полей записи, если есть (иначе пусто — og:image возьмём при обогащении)."""
+    for m in (getattr(e, "media_content", None) or []):
+        if m.get("url"):
+            return [m["url"]]
+    for m in (getattr(e, "media_thumbnail", None) or []):
+        if m.get("url"):
+            return [m["url"]]
+    for l in (getattr(e, "links", None) or []):
+        if l.get("rel") == "enclosure" and str(l.get("type", "")).startswith("image") and l.get("href"):
+            return [l["href"]]
+    return []
 
 
 def _clean(text: str) -> str:
@@ -42,5 +63,7 @@ class RssCollector(Collector):
                 url=link,
                 summary=summary,
                 published=published,
+                published_ts=_entry_ts(e),
+                images=_entry_image(e),
             ))
         return items

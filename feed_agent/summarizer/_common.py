@@ -19,8 +19,9 @@ SUMMARY_INSTRUCTION = (
     "один JSON-объект, без пояснений вокруг и без markdown-ограждения:\n"
     '{"headline":"<заголовок-суть по-русски: сама суть новости одной ёмкой строкой, '
     'не кликбейт>",'
-    '"explain":"<1-2 предложения: что именно произошло и в чём интерес — прорыв, '
-    'достижение, сдвиг, на что обращено внимание. Самодостаточно, по-русски>",'
+    '"key":"<ОДНА короткая строка с ключевыми цифрами/фактами: что, сколько, когда>",'
+    '"explain":"<1-2 предложения: что произошло и в чём интерес — прорыв, достижение, '
+    'сдвиг, на что обращено внимание. Самодостаточно, по-русски>",'
     '"takeaways":["<короткий тезис>","<ещё>"],'
     '"conclusion":"<короткий вывод/аналитика: почему это важно>"}\n'
     "Пиши по-русски, кратко и по делу, без воды и без отсылок к статье.\n\n"
@@ -32,6 +33,7 @@ SUMMARY_BATCH_INSTRUCTION = (
     "(пронумерованы). По КАЖДОЙ сделай выжимку. Ответ — СТРОГО JSON-массив объектов, по "
     "одному на новость, без пояснений и без markdown-ограждения:\n"
     '[{"i":<номер>,"headline":"<заголовок-суть по-русски, не кликбейт>",'
+    '"key":"<ОДНА строка: ключевые цифры/факты>",'
     '"explain":"<1-2 предложения: что произошло и в чём интерес/прорыв>",'
     '"takeaways":["<короткий тезис>"],"conclusion":"<короткий вывод: почему важно>"}, ...]\n'
     "Пиши по-русски, кратко, без воды. Охвати ВСЕ номера.\n\n"
@@ -66,6 +68,7 @@ def extract_json(text: str, opener: str, closer: str):
 def _normalize(obj: dict, item: Item) -> dict | None:
     """Привести один разобранный объект выжимки к нашему формату (или None, если пусто)."""
     headline = str(obj.get("headline", "")).strip()[:200]
+    key = str(obj.get("key", "")).strip()[:300]
     explain = str(obj.get("explain", "")).strip()[:600]
     conclusion = str(obj.get("conclusion", "")).strip()[:500]
     takeaways = obj.get("takeaways", [])
@@ -74,7 +77,7 @@ def _normalize(obj: dict, item: Item) -> dict | None:
     takeaways = [str(t).strip()[:200] for t in takeaways if str(t).strip()][:5]
     if not explain and not headline:
         return None
-    return {"title": headline or item.title, "summary": explain,
+    return {"title": headline or item.title, "summary": explain, "key": key,
             "takeaways": takeaways, "conclusion": conclusion}
 
 

@@ -37,6 +37,8 @@ class Settings:
 
     max_items_per_run: int = 60
     history_days: int = 14
+    # Окно свежести: новости старше этого (по времени поста) в дайджест не идут.
+    freshness_hours: int = 30
     # Сколько свежих новостей просеиваем фильтром релевантности за прогон (по заголовкам).
     # Крупно — цель «все новости», а не «топ-N».
     prefilter_pool: int = 200
@@ -79,6 +81,7 @@ def load_settings() -> Settings:
     return Settings(
         max_items_per_run=run.get("max_items_per_run", d.max_items_per_run),
         history_days=run.get("history_days", d.history_days),
+        freshness_hours=run.get("freshness_hours", d.freshness_hours),
         prefilter_pool=run.get("prefilter_pool", d.prefilter_pool),
         enrich_per_run=run.get("enrich_per_run", d.enrich_per_run),
         threshold=flt.get("threshold", d.threshold),

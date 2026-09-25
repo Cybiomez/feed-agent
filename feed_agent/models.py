@@ -26,7 +26,10 @@ class Item:
     url: str
     summary: str = ""              # краткое описание из ленты (может быть пустым)
     published: str = ""            # ISO-время публикации, если лента его дала
+    published_ts: float = 0.0      # то же время в epoch-секундах (для окна свежести); 0 = неизвестно
     collected_at: str = ""         # когда мы её забрали (проставляет пайплайн)
+    images: list = field(default_factory=list)  # URL картинок поста (не качаем — отдаём Telegram)
+    video: str = ""                # ссылка на видео поста, если есть
 
     # Идентификатор для дедупликации: хеш от url + нормализованный заголовок.
     # Свойство, а не поле — считается на лету, всегда согласован с содержимым.
@@ -57,9 +60,12 @@ class Enriched:
     uid: str
     source_name: str
     url: str
-    ru_title: str
-    ru_summary: str                      # 2–3 предложения сути (для дайджеста)
+    ru_title: str                        # заголовок-суть (чистый, без ссылки)
+    ru_summary: str                      # развёрнутое описание (для «Подробнее»)
+    ru_key: str = ""                     # одна строка: ключевые цифры/факты (в основное сообщение)
     ru_takeaways: list = field(default_factory=list)  # тейки (для «Подробнее»)
     ru_conclusion: str = ""              # вывод/аналитика (для «Подробнее»)
-    image_url: str = ""
-    sources: str = ""                    # все источники новости (при слиянии дублей — через +)
+    source_links: list = field(default_factory=list)  # [{name,url}] источников (ссылки в перечне)
+    images: list = field(default_factory=list)         # URL картинок (первая — в сообщение, все — в «Подробнее»)
+    video: str = ""                      # ссылка на видео, если есть
+    sources: str = ""                    # имена источников через + (запасной показ)

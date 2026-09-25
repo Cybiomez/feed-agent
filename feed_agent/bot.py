@@ -18,7 +18,7 @@ from html import escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import (CallbackQuery, InlineKeyboardButton, InputMediaPhoto, Message)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -82,32 +82,49 @@ def _react(uid: str, reaction: str) -> None:
 
 # --- сборка сообщений ---
 
-def _digest_message(items: list[Enriched], start: int = 1) -> tuple[str, object]:
-    """Текст одной страницы дайджеста + инлайн-клавиатура (ряд кнопок на каждую новость).
-    start — номер первой новости на странице (для сквозной нумерации)."""
-    lines = ["🗞 <b>Дайджест</b>"]
+def _sources_html(e: Enriched) -> str:
+    """Строка источников: каждое название — ссылка на оригинальный пост/статью."""
+    parts = []
+    for l in (e.source_links or []):
+        name, url = l.get("name", ""), l.get("url", "")
+        if name and url:
+            parts.append(f'<a href="{escape(url, quote=True)}">{escape(name)}</a>')
+    if parts:
+        return "Источники: " + " · ".join(parts)
+    return f"<i>{escape(e.sources or e.source_name)}</i>"
+
+
+def _item_caption(e: Enriched) -> str:
+    """Основное сообщение новости: чистый заголовок + строка ключевых цифр + источники."""
+    parts = [f"<b>{escape(e.ru_title)}</b>"]
+    if e.ru_key:
+        parts.append(escape(e.ru_key))
+    parts.append(_sources_html(e))
+    return "\n".join(parts)
+
+
+def _item_keyboard(e: Enriched):
     kb = InlineKeyboardBuilder()
-    for offset, e in enumerate(items):
-        n = start + offset
-        src = escape(e.sources or e.source_name)
-        lines.append(f"\n<b>{n}. {escape(e.ru_title)}</b>\n{escape(e.ru_summary)}\n<i>{src}</i>")
-        kb.row(
-            InlineKeyboardButton(text=f"{n} 📖 Подробнее", callback_data=f"det:{e.uid}"),
-            InlineKeyboardButton(text="👍", callback_data=f"up:{e.uid}"),
-            InlineKeyboardButton(text="👎", callback_data=f"down:{e.uid}"),
-        )
-    return "\n".join(lines), kb.as_markup()
+    kb.row(
+        InlineKeyboardButton(text="📖 Подробнее", callback_data=f"det:{e.uid}"),
+        InlineKeyboardButton(text="👍", callback_data=f"up:{e.uid}"),
+        InlineKeyboardButton(text="👎", callback_data=f"down:{e.uid}"),
+    )
+    return kb.as_markup()
 
 
 def _detail_text(e: Enriched) -> str:
-    """Развёрнутый разбор новости для «Подробнее»."""
-    parts = [f"<b>{escape(e.ru_title)}</b>", "", escape(e.ru_summary)]
+    """Развёрнутый разбор для «Подробнее»: полное описание + тейки + вывод + источники."""
+    parts = [f"<b>{escape(e.ru_title)}</b>"]
+    if e.ru_summary:
+        parts += ["", escape(e.ru_summary)]
     if e.ru_takeaways:
         parts += ["", "<b>Главное:</b>"] + [f"• {escape(t)}" for t in e.ru_takeaways]
     if e.ru_conclusion:
         parts += ["", f"<b>Вывод:</b> {escape(e.ru_conclusion)}"]
-    src = escape(e.sources or e.source_name)
-    parts += ["", f"<i>{src}</i> · <a href=\"{escape(e.url, quote=True)}\">оригинал</a>"]
+    parts += ["", _sources_html(e)]
+    if e.video:
+        parts.append(f'🎬 <a href="{escape(e.video, quote=True)}">видео</a>')
     return "\n".join(parts)
 
 
@@ -165,22 +182,37 @@ def build_dispatcher(chat_id: int, thread_id: int | None,
             await cb.answer("Новость не найдена", show_alert=False)
             return
         text = _detail_text(e)
+        imgs = e.images or []
         try:
-            if e.image_url and len(text) <= 1024:
-                await cb.bot.send_photo(chat_id, photo=e.image_url, caption=text,
+            if len(imgs) >= 2:
+                # альбом (до 10) по URL; подпись на первом фото, если влезает
+                media = []
+                for idx, u in enumerate(imgs[:10]):
+                    cap = text if (idx == 0 and len(text) <= 1024) else None
+                    media.append(InputMediaPhoto(media=u, caption=cap, parse_mode="HTML"))
+                await cb.bot.send_media_group(chat_id, media, message_thread_id=thread_id)
+                if len(text) > 1024:
+                    await cb.bot.send_message(chat_id, text, message_thread_id=thread_id,
+                                              disable_web_page_preview=True)
+            elif len(imgs) == 1 and len(text) <= 1024:
+                await cb.bot.send_photo(chat_id, photo=imgs[0], caption=text,
                                         message_thread_id=thread_id)
             else:
-                if e.image_url:
+                if imgs:
                     try:
-                        await cb.bot.send_photo(chat_id, photo=e.image_url,
-                                                message_thread_id=thread_id)
+                        await cb.bot.send_photo(chat_id, photo=imgs[0], message_thread_id=thread_id)
                     except Exception:
-                        pass  # битая картинка — не мешаем тексту
+                        pass
                 await cb.bot.send_message(chat_id, text, message_thread_id=thread_id,
                                           disable_web_page_preview=True)
         except Exception as ex:
             log.warning("detail send failed: %s", ex)
-            await cb.answer("Не удалось отправить", show_alert=False)
+            try:  # фолбэк — только текст
+                await cb.bot.send_message(chat_id, text, message_thread_id=thread_id,
+                                          disable_web_page_preview=True)
+            except Exception:
+                pass
+            await cb.answer()
             return
         await cb.answer("Развернул ниже")
 
@@ -194,26 +226,36 @@ def build_dispatcher(chat_id: int, thread_id: int | None,
 
 
 async def send_digest(bot: Bot, chat_id: int, thread_id: int | None) -> int:
-    """Прогнать конвейер и отправить ВСЕ готовые новости постранично (ничего не режем).
-    Возвращает число отправленных."""
+    """Прогнать конвейер и отправить КАЖДУЮ новость отдельным сообщением (фото+подпись+кнопки
+    или текст+кнопки). Ничего не режем. Возвращает число отправленных."""
     items = await asyncio.to_thread(_prepare_digest)
     if not items:
         log.info("digest: нечего слать")
         return 0
-    page = max(1, config.load_settings().digest_max_items)
     sent: list[str] = []
-    start = 1
-    for i in range(0, len(items), page):
-        chunk = items[i : i + page]
-        text, markup = _digest_message(chunk, start=start)
-        await bot.send_message(chat_id, text, message_thread_id=thread_id,
-                               reply_markup=markup, disable_web_page_preview=True)
-        sent += [e.uid for e in chunk]
-        start += len(chunk)
-        await asyncio.sleep(0.5)   # мягко к лимитам Telegram
-    await asyncio.to_thread(_mark_delivered, sent)
-    log.info("digest: отправлено %d (страниц %d)", len(items), (len(items) + page - 1) // page)
-    return len(items)
+    for e in items:
+        caption = _item_caption(e)
+        kb = _item_keyboard(e)
+        try:
+            if e.images and len(caption) <= 1024:
+                await bot.send_photo(chat_id, photo=e.images[0], caption=caption,
+                                     reply_markup=kb, message_thread_id=thread_id)
+            else:
+                await bot.send_message(chat_id, caption, reply_markup=kb,
+                                       message_thread_id=thread_id, disable_web_page_preview=True)
+        except Exception as ex:
+            log.warning("send item %s failed: %s", e.uid, ex)
+            try:  # фолбэк без фото (напр. битый URL картинки)
+                await bot.send_message(chat_id, caption, reply_markup=kb,
+                                       message_thread_id=thread_id, disable_web_page_preview=True)
+            except Exception:
+                continue
+        sent.append(e.uid)
+        await asyncio.sleep(3.0)   # лимит Telegram на группу ~20 сообщений/мин
+    if sent:
+        await asyncio.to_thread(_mark_delivered, sent)
+    log.info("digest: отправлено %d (по одной)", len(sent))
+    return len(sent)
 
 
 async def main() -> None:

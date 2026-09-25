@@ -25,7 +25,10 @@ CREATE TABLE IF NOT EXISTS items (
     url          TEXT NOT NULL,
     summary      TEXT DEFAULT '',
     published    TEXT DEFAULT '',
+    published_ts REAL DEFAULT 0,        -- epoch публикации (для окна свежести); 0 = неизвестно
     collected_at TEXT NOT NULL,
+    images       TEXT DEFAULT '',       -- JSON-список URL картинок поста
+    video        TEXT DEFAULT '',       -- ссылка на видео, если есть
     delivered    INTEGER DEFAULT 0      -- 1 = уже ушло в дайджест
 );
 CREATE TABLE IF NOT EXISTS scores (
@@ -41,9 +44,13 @@ CREATE TABLE IF NOT EXISTS enrichment (  -- русская выжимка по �
     image_url    TEXT DEFAULT '',        -- главная картинка (для «Подробнее»)
     ru_title     TEXT DEFAULT '',        -- заголовок по-русски
     ru_summary   TEXT DEFAULT '',        -- 2–3 предложения сути (для дайджеста)
+    ru_key       TEXT DEFAULT '',        -- ключевые цифры/факты одной строкой (в сообщение)
     ru_takeaways TEXT DEFAULT '',        -- JSON-список тейков (для «Подробнее»)
     ru_conclusion TEXT DEFAULT '',       -- вывод/аналитика (для «Подробнее»)
-    sources      TEXT DEFAULT '',        -- все источники (при слиянии дублей — через " + ")
+    source_links TEXT DEFAULT '',        -- JSON [{name,url}] источников (ссылки в перечне)
+    images       TEXT DEFAULT '',        -- JSON-список URL картинок (первая — в сообщение)
+    video        TEXT DEFAULT '',        -- ссылка на видео, если есть
+    sources      TEXT DEFAULT '',        -- имена источников через " + " (запасной показ)
     enriched_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reactions (   -- этап 2: 👍/👎 на пункты дайджеста
@@ -77,9 +84,16 @@ class Storage:
 
     def _migrate(self) -> None:
         """Мягкие миграции: добавить недостающие колонки в существующую базу."""
-        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(enrichment)")}
-        if "sources" not in cols:
-            self._db.execute("ALTER TABLE enrichment ADD COLUMN sources TEXT DEFAULT ''")
+        def add(table: str, coldefs: dict[str, str]) -> None:
+            have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+            for name, decl in coldefs.items():
+                if name not in have:
+                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        add("items", {"published_ts": "REAL DEFAULT 0", "images": "TEXT DEFAULT ''",
+                      "video": "TEXT DEFAULT ''"})
+        add("enrichment", {"sources": "TEXT DEFAULT ''", "ru_key": "TEXT DEFAULT ''",
+                           "source_links": "TEXT DEFAULT ''", "images": "TEXT DEFAULT ''",
+                           "video": "TEXT DEFAULT ''"})
 
     def close(self) -> None:
         self._db.close()
@@ -95,10 +109,12 @@ class Storage:
         if self.exists(item.uid):
             return False
         self._db.execute(
-            "INSERT INTO items (uid, source_name, title, url, summary, published, collected_at)"
-            " VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO items (uid, source_name, title, url, summary, published, published_ts,"
+            " collected_at, images, video) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (item.uid, item.source_name, item.title, item.url,
-             item.summary, item.published, item.collected_at or _now()),
+             item.summary, item.published, float(item.published_ts or 0),
+             item.collected_at or _now(),
+             json.dumps(item.images or [], ensure_ascii=False), item.video or ""),
         )
         self._db.commit()
         return True
@@ -168,25 +184,31 @@ class Storage:
         )
         return [self._row_to_item(r) for r in cur.fetchall()]
 
-    def save_enrichment(self, uid: str, fulltext: str, image_url: str, ru: dict,
-                        sources: str = "") -> None:
-        """Сохранить результат выжимки. ru = {title, summary, takeaways[list], conclusion}.
-        sources — все источники новости (при слиянии дублей — через " + ")."""
+    def save_enrichment(self, uid: str, fulltext: str, ru: dict,
+                        source_links: list | None = None, images: list | None = None,
+                        video: str = "") -> None:
+        """Сохранить результат выжимки. ru = {title, summary, key, takeaways[list], conclusion}.
+        source_links = [{name,url}] (ссылки в перечне источников); images = список URL картинок.
+        Пустой ru (без summary) = пометка «обработано, но не для дайджеста» (отсев/слияние)."""
+        links = source_links or []
+        names = " + ".join(dict.fromkeys(l.get("name", "") for l in links if l.get("name")))
         self._db.execute(
             "INSERT OR REPLACE INTO enrichment"
-            " (item_uid, fulltext, image_url, ru_title, ru_summary, ru_takeaways,"
-            "  ru_conclusion, sources, enriched_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (uid, fulltext or "", image_url or "", ru.get("title", ""),
-             ru.get("summary", ""), json.dumps(ru.get("takeaways", []), ensure_ascii=False),
-             ru.get("conclusion", ""), sources or "", _now()),
+            " (item_uid, fulltext, ru_title, ru_summary, ru_key, ru_takeaways, ru_conclusion,"
+            "  source_links, images, video, sources, enriched_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, fulltext or "", ru.get("title", ""), ru.get("summary", ""),
+             ru.get("key", ""), json.dumps(ru.get("takeaways", []), ensure_ascii=False),
+             ru.get("conclusion", ""), json.dumps(links, ensure_ascii=False),
+             json.dumps(images or [], ensure_ascii=False), video or "", names, _now()),
         )
         self._db.commit()
 
     def enriched_for_digest(self, limit: int) -> list[Enriched]:
         """Обогащённые, но ещё не отправленные новости — то, что пойдёт в дайджест."""
         cur = self._db.execute(
-            "SELECT i.uid, i.source_name, i.url, e.image_url, e.ru_title, e.ru_summary,"
-            "       e.ru_takeaways, e.ru_conclusion, e.sources"
+            "SELECT i.uid, i.source_name, i.url, e.ru_title, e.ru_summary, e.ru_key,"
+            "       e.ru_takeaways, e.ru_conclusion, e.source_links, e.images, e.video, e.sources"
             " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
             " WHERE i.delivered = 0 AND e.ru_summary != ''"
             " ORDER BY i.collected_at DESC LIMIT ?",
@@ -196,22 +218,28 @@ class Storage:
 
     @staticmethod
     def _row_to_enriched(r: sqlite3.Row) -> Enriched:
-        try:
-            takeaways = json.loads(r["ru_takeaways"] or "[]")
-        except (ValueError, TypeError):
-            takeaways = []
+        keys = r.keys()
+        def js(col, default):
+            try:
+                return json.loads(r[col]) if col in keys and r[col] else default
+            except (ValueError, TypeError):
+                return default
+        sources = r["sources"] if ("sources" in keys and r["sources"]) else r["source_name"]
         return Enriched(
             uid=r["uid"], source_name=r["source_name"], url=r["url"],
             ru_title=r["ru_title"], ru_summary=r["ru_summary"],
-            ru_takeaways=takeaways, ru_conclusion=r["ru_conclusion"],
-            image_url=r["image_url"], sources=(r["sources"] or r["source_name"]),
+            ru_key=(r["ru_key"] if "ru_key" in keys and r["ru_key"] else ""),
+            ru_takeaways=js("ru_takeaways", []), ru_conclusion=r["ru_conclusion"],
+            source_links=js("source_links", []), images=js("images", []),
+            video=(r["video"] if "video" in keys and r["video"] else ""),
+            sources=sources,
         )
 
     def get_enriched(self, uid: str) -> Enriched | None:
         """Одна обогащённая новость по id — для разворота «Подробнее»."""
         cur = self._db.execute(
-            "SELECT i.uid, i.source_name, i.url, e.image_url, e.ru_title, e.ru_summary,"
-            "       e.ru_takeaways, e.ru_conclusion, e.sources"
+            "SELECT i.uid, i.source_name, i.url, e.ru_title, e.ru_summary, e.ru_key,"
+            "       e.ru_takeaways, e.ru_conclusion, e.source_links, e.images, e.video, e.sources"
             " FROM items i JOIN enrichment e ON e.item_uid = i.uid"
             " WHERE i.uid = ? AND e.ru_summary != ''",
             (uid,),
@@ -258,7 +286,15 @@ class Storage:
 
     @staticmethod
     def _row_to_item(r: sqlite3.Row) -> Item:
+        keys = r.keys()
+        try:
+            images = json.loads(r["images"]) if "images" in keys and r["images"] else []
+        except (ValueError, TypeError):
+            images = []
         return Item(
             source_name=r["source_name"], title=r["title"], url=r["url"],
-            summary=r["summary"], published=r["published"], collected_at=r["collected_at"],
+            summary=r["summary"], published=r["published"],
+            published_ts=(r["published_ts"] if "published_ts" in keys and r["published_ts"] else 0.0),
+            collected_at=r["collected_at"],
+            images=images, video=(r["video"] if "video" in keys and r["video"] else ""),
         )
