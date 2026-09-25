@@ -27,6 +27,16 @@ class Summarizer(ABC):
         По умолчанию — каждая сама по себе (без слияния); модель переопределяет."""
         return [[i] for i in range(len(items))]
 
+    def dedup_against(self, new_titles: list[str], delivered_titles: list[str]) -> list[str]:
+        """Сверить новые заголовки с показанными за период: 'new'|'repeat'|'update' на каждый.
+        По умолчанию — всё 'new' (без дедупа); модель переопределяет."""
+        return ["new"] * len(new_titles)
+
+    def summarize_batch(self, articles: list[tuple[Item, str]]) -> list[dict | None]:
+        """Выжимки по нескольким статьям. По умолчанию — по одной (self.summarize); модель
+        переопределяет пачкой (экономия). Возвращает список той же длины."""
+        return [self.summarize(it, body) for it, body in articles]
+
     @abstractmethod
     def summarize(self, item: Item, fulltext: str) -> dict | None:
         """Сделать русскую выжимку по полному тексту статьи.
