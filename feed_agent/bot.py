@@ -19,6 +19,7 @@ from html import escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InputMediaPhoto, Message)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -256,30 +257,45 @@ def build_dispatcher(chat_id: int, thread_id: int | None,
     return dp
 
 
+async def _deliver_item(bot: Bot, dc: int, dt: int | None, e: Enriched) -> bool:
+    """Отправить одну новость с учётом flood-control (ждём Retry-After и повторяем) и битой
+    картинки (шлём текстом). True — доставлено."""
+    caption = _item_caption(e)
+    kb = _item_keyboard(e)
+    want_photo = bool(e.images) and len(caption) <= 1024
+    for _ in range(5):
+        try:
+            if want_photo:
+                await bot.send_photo(dc, photo=e.images[0], caption=caption,
+                                     reply_markup=kb, message_thread_id=dt)
+            else:
+                await bot.send_message(dc, caption, reply_markup=kb,
+                                       message_thread_id=dt, disable_web_page_preview=True)
+            return True
+        except TelegramRetryAfter as fl:              # флуд-лимит — ждём столько, сколько велят
+            log.info("flood: жду %sс", fl.retry_after)
+            await asyncio.sleep(fl.retry_after + 1)
+        except TelegramBadRequest as ex:
+            if want_photo:                            # чаще всего — битый URL картинки
+                want_photo = False                    # повторим текстом
+                continue
+            log.warning("send %s failed: %s", e.uid, ex)
+            return False
+        except Exception as ex:
+            log.warning("send %s failed: %s", e.uid, ex)
+            return False
+    return False
+
+
 async def send_digest(bot: Bot, chat_id: int, thread_id: int | None, final: bool = False) -> int:
     """Прогнать конвейер и отправить КАЖДУЮ новость отдельным сообщением. final=True —
     финальный прогон дня: без лимита, выдаёт всю очередь. В конце — строка видимости очереди."""
     items, stats = await asyncio.to_thread(_prepare_digest, final)
     sent: list[str] = []
     for e in items:
-        caption = _item_caption(e)
-        kb = _item_keyboard(e)
-        try:
-            if e.images and len(caption) <= 1024:
-                await bot.send_photo(chat_id, photo=e.images[0], caption=caption,
-                                     reply_markup=kb, message_thread_id=thread_id)
-            else:
-                await bot.send_message(chat_id, caption, reply_markup=kb,
-                                       message_thread_id=thread_id, disable_web_page_preview=True)
-        except Exception as ex:
-            log.warning("send item %s failed: %s", e.uid, ex)
-            try:  # фолбэк без фото (напр. битый URL картинки)
-                await bot.send_message(chat_id, caption, reply_markup=kb,
-                                       message_thread_id=thread_id, disable_web_page_preview=True)
-            except Exception:
-                continue
-        sent.append(e.uid)
-        await asyncio.sleep(3.0)   # лимит Telegram на группу ~20 сообщений/мин
+        if await _deliver_item(bot, chat_id, thread_id, e):
+            sent.append(e.uid)
+        await asyncio.sleep(3.0)   # база между отправками (даже при неудаче — не долбим)
     if sent:
         await asyncio.to_thread(_mark_delivered, sent)
 
