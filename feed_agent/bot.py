@@ -305,10 +305,14 @@ async def send_digest(bot: Bot, chat_id: int, thread_id: int | None, final: bool
                   f" · повторов отсеяно: {stats['repeat']} · обновлений: {stats['updates']}")
         status += ("\n✅ Финальный прогон дня — очередь выдана полностью." if final
                    else "\nОстаток уйдёт следующими прогонами (финальный в 17:30 отдаёт всё).")
-        try:
-            await bot.send_message(chat_id, status, message_thread_id=thread_id)
-        except Exception:
-            pass
+        for _ in range(5):                    # строку статуса тоже шлём с учётом флуд-лимита
+            try:
+                await bot.send_message(chat_id, status, message_thread_id=thread_id)
+                break
+            except TelegramRetryAfter as fl:
+                await asyncio.sleep(fl.retry_after + 1)
+            except Exception:
+                break
     log.info("digest%s: отправлено %d, в очереди %d, повторов %d, обновлений %d",
              " (final)" if final else "", len(sent), stats["pending"],
              stats["repeat"], stats["updates"])
